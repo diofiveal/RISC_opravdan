@@ -1,4 +1,4 @@
-/// Copyright by Syntacore LLC © 2016-2021. See LICENSE for details
+/// Copyright by Syntacore LLC ï¿½ 2016-2021. See LICENSE for details
 /// @file       <scr1_riscv_isa_decoding.svh>
 /// @brief      RISC-V ISA definitions file
 ///
@@ -172,6 +172,7 @@ typedef struct packed {
     logic                               mret_req;
     logic                               fencei_req;
     logic                               wfi_req;
+    logic                               early_branch_done; // if branch has already been resolved in IDU
     logic [SCR1_GPR_FIELD_WIDTH-1:0]    rs1_addr;       // also used as zimm for CSRRxI instructions
     logic [SCR1_GPR_FIELD_WIDTH-1:0]    rs2_addr;
     logic [SCR1_GPR_FIELD_WIDTH-1:0]    rd_addr;

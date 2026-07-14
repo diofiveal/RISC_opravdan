@@ -89,10 +89,13 @@
   parameter int unsigned SCR1_MTVEC_BASE_WR_BITS = 16;
   `define SCR1_MTVEC_MODE_EN
   `define SCR1_NO_DEC_STAGE
+  `define SCR1_NO_EXE_STAGE
   `define SCR1_MPRF_RST_EN
   `define SCR1_MCOUNTEN_EN
   `define SCR1_DBG_EN
   `define SCR1_TDU_EN
+  `define SCR1_EARLY_BRANCH // I'll define new macros for early brench processing.
+                            // If macros is active, the branches will be resolved in IDU.
   parameter int unsigned SCR1_TDU_TRIG_NUM = 2;
   `define SCR1_TDU_ICOUNT_EN
   `define SCR1_IPIC_EN
@@ -102,8 +105,8 @@
   `define SCR1_RVE_EXT
   `define SCR1_RVC_EXT
   parameter int unsigned SCR1_MTVEC_BASE_WR_BITS = 0;
-  `define SCR1_NO_DEC_STAGE
-  `define SCR1_NO_EXE_STAGE
+  // `define SCR1_NO_DEC_STAGE
+  // `define SCR1_NO_EXE_STAGE
   `define SCR1_TCM_EN
 
 `else // begin custom configuration section
