@@ -68,6 +68,11 @@ module scr1_pipe_ifu
     output  logic                                   ifu2idu_imem_err_o,         // Instruction access fault exception
     output  logic                                   ifu2idu_err_rvi_hi_o,       // 1 - imem fault when trying to fetch second half of an unaligned RVI instruction
     output  logic                                   ifu2idu_vd_o                // IFU request
+`ifdef SCR1_EARLY_BRANCH
+    input  logic                                    idu2ifu_branch_req_i,
+    input  logic [`SCR1_XLEN-1:0]                   idu2ifu_branch_target_i,
+    output logic [`SCR1_XLEN-1:0]                   ifu2idu_pc_o
+`endif
 );
 
 //------------------------------------------------------------------------------
@@ -129,6 +134,13 @@ typedef enum logic [2:0] {
 //------------------------------------------------------------------------------
 // Local signals declaration
 //------------------------------------------------------------------------------
+
+// Early branch signals
+//------------------------------------------------------------------------------
+`ifdef SCR1_EARLY_BRANCH
+logic                               pc_new_req_internal;
+logic [`SCR1_XLEN-1:0]              pc_new_addr_internal;
+`endif
 
 // Instruction queue signals
 //------------------------------------------------------------------------------
@@ -242,6 +254,7 @@ type_scr1_bypass_e                  instr_bypass_type;
 logic                               instr_bypass_vd;
 `endif // SCR1_NO_DEC_STAGE
 
+
 //------------------------------------------------------------------------------
 // Instruction queue
 //------------------------------------------------------------------------------
@@ -256,10 +269,29 @@ logic                               instr_bypass_vd;
  // - Status logic
 //
 
+// Priority to EARLY_BRANCH
+`ifdef SCR1_EARLY_BRANCH
+always_comb begin
+    if (idu2ifu_branch_req_i) begin
+        pc_new_req_internal = 1'b1;
+        pc_new_addr_internal = idu2ifu_branch_target_i;
+    end else if (exu2ifu_pc_new_req_i) begin
+        pc_new_req_internal = 1'b1;
+        pc_new_addr_internal = exu2ifu_pc_new_i;
+    end else begin
+        pc_new_req_internal = 1'b0;
+        pc_new_addr_internal = '0;
+    end
+end
+`endif // SCR1_EARLY_BRANCH
+
 // New PC unaligned flag register
 //------------------------------------------------------------------------------
-
+`ifdef SCR1_EARLY_BRANCH
+assign new_pc_unaligned_upd = pc_new_req_internal | imem_resp_vd;
+'else
 assign new_pc_unaligned_upd = exu2ifu_pc_new_req_i | imem_resp_vd;
+`endif // SCR1_EARLY_BRANCH
 
 always_ff @(posedge clk, negedge rst_n) begin
     if (~rst_n) begin
@@ -269,9 +301,15 @@ always_ff @(posedge clk, negedge rst_n) begin
     end
 end
 
+`ifdef SCR1_EARLY_BRANCH
+assign new_pc_unaligned_next = pc_new_req_internal ? pc_new_addr_internal[1]
+                             : ~imem_resp_vd        ? new_pc_unaligned_ff
+                                                    : 1'b0;
+`else
 assign new_pc_unaligned_next = exu2ifu_pc_new_req_i ? exu2ifu_pc_new_i[1]
                              : ~imem_resp_vd        ? new_pc_unaligned_ff
                                                     : 1'b0;
+`endif // SCR1_EARLY_BRANCH
 
 // Instruction type decoder
 //------------------------------------------------------------------------------
@@ -305,17 +343,27 @@ end
 // instruction in its high part
 //------------------------------------------------------------------------------
 
+// Define signal that will be used in always_ff below
+`ifdef SCR1_EARLY_BRANCH
+logic pc_req_for_instr_hi;
+assign pc_req_for_instr_hi = pc_new_req_internal;
+`else
+logic pc_req_for_instr_hi;
+assign pc_req_for_instr_hi = exu2ifu_pc_new_req_i;
+`endif
+
 always_ff @(posedge clk, negedge rst_n) begin
     if (~rst_n) begin
         instr_hi_rvi_lo_ff <= 1'b0;
     end else begin
-        if (exu2ifu_pc_new_req_i) begin
+        if (pc_req_for_instr_hi) begin
             instr_hi_rvi_lo_ff <= 1'b0;
         end else if (imem_resp_vd) begin
             instr_hi_rvi_lo_ff <= instr_hi_rvi_lo_next;
         end
     end
 end
+
 
 assign instr_hi_rvi_lo_next = (instr_type == SCR1_IFU_INSTR_RVI_LO_NV)
                             | (instr_type == SCR1_IFU_INSTR_RVI_LO_RVI_HI)
@@ -378,7 +426,11 @@ assign q_wr_full   = (q_wr_size == SCR1_IFU_QUEUE_WR_FULL);
 // Write/read pointer registers
 //------------------------------------------------------------------------------
 
+`ifdef SCR1_EARLY_BRANCH
+assign q_flush_req = pc_new_req_internal | pipe2ifu_stop_fetch_i;
+`else
 assign q_flush_req = exu2ifu_pc_new_req_i | pipe2ifu_stop_fetch_i;
+`endif
 
 // Queue write pointer register
 assign q_wptr_upd  = q_flush_req | ~q_wr_none;
@@ -462,9 +514,15 @@ assign q_head_is_rvc    = ~q_head_is_rvi;
 //------------------------------------------------------------------------------
 
 // IFU FSM control signals
+`ifdef SCR1_EARLY_BRANCH
+assign ifu_fetch_req = pc_new_req_internal & ~pipe2ifu_stop_fetch_i;
+assign ifu_stop_req  = pipe2ifu_stop_fetch_i
+                     | (imem_resp_er_discard_pnd & ~pc_new_req_internal);
+`else
 assign ifu_fetch_req = exu2ifu_pc_new_req_i & ~pipe2ifu_stop_fetch_i;
 assign ifu_stop_req  = pipe2ifu_stop_fetch_i
                      | (imem_resp_er_discard_pnd & ~exu2ifu_pc_new_req_i);
+`endif // SCR1_EARLY_BRANCH
 
 always_ff @(posedge clk, negedge rst_n) begin
     if (~rst_n) begin
@@ -515,7 +573,11 @@ assign imem_handshake_done = ifu2imem_req_o & imem2ifu_req_ack_i;
 // IMEM address register
 //------------------------------------------------------------------------------
 
+`ifdef SCR1_EARLY_BRANCH
+assign imem_addr_upd = imem_handshake_done | pc_new_req_internal;
+`else
 assign imem_addr_upd = imem_handshake_done | exu2ifu_pc_new_req_i;
+`endif //SCR1_EARLY_BRANCH
 
 always_ff @(posedge clk, negedge rst_n) begin
     if (~rst_n) begin
@@ -525,15 +587,27 @@ always_ff @(posedge clk, negedge rst_n) begin
     end
 end
 
-`ifndef SCR1_NEW_PC_REG
-assign imem_addr_next = exu2ifu_pc_new_req_i ? exu2ifu_pc_new_i[`SCR1_XLEN-1:2]                 + imem_handshake_done
-                      : &imem_addr_ff[5:2]   ? imem_addr_ff                                     + imem_handshake_done
-                                             : {imem_addr_ff[`SCR1_XLEN-1:6], imem_addr_ff[5:2] + imem_handshake_done};
-`else // SCR1_NEW_PC_REG
-assign imem_addr_next = exu2ifu_pc_new_req_i ? exu2ifu_pc_new_i[`SCR1_XLEN-1:2]
-                      : &imem_addr_ff[5:2]   ? imem_addr_ff                                     + imem_handshake_done
-                                             : {imem_addr_ff[`SCR1_XLEN-1:6], imem_addr_ff[5:2] + imem_handshake_done};
-`endif // SCR1_NEW_PC_REG
+`ifdef SCR1_EARLY_BRANCH
+    `ifndef SCR1_NEW_PC_REG
+    assign imem_addr_next = pc_new_req_internal ? pc_new_addr_internal[`SCR1_XLEN-1:2] + imem_handshake_done
+                          : &imem_addr_ff[5:2]   ? imem_addr_ff                                     + imem_handshake_done
+                                                 : {imem_addr_ff[`SCR1_XLEN-1:6], imem_addr_ff[5:2] + imem_handshake_done};
+    `else // SCR1_NEW_PC_REG
+    assign imem_addr_next = pc_new_req_internal ? pc_new_addr_internal[`SCR1_XLEN-1:2]
+                          : &imem_addr_ff[5:2]   ? imem_addr_ff                                     + imem_handshake_done
+                                                 : {imem_addr_ff[`SCR1_XLEN-1:6], imem_addr_ff[5:2] + imem_handshake_done};
+    `endif
+`else // ~SCR1_EARLY_BRANCH
+    `ifndef SCR1_NEW_PC_REG
+    assign imem_addr_next = exu2ifu_pc_new_req_i ? exu2ifu_pc_new_i[`SCR1_XLEN-1:2] + imem_handshake_done
+                          : &imem_addr_ff[5:2]   ? imem_addr_ff                                     + imem_handshake_done
+                                                 : {imem_addr_ff[`SCR1_XLEN-1:6], imem_addr_ff[5:2] + imem_handshake_done};
+    `else // SCR1_NEW_PC_REG
+    assign imem_addr_next = exu2ifu_pc_new_req_i ? exu2ifu_pc_new_i[`SCR1_XLEN-1:2]
+                          : &imem_addr_ff[5:2]   ? imem_addr_ff                                     + imem_handshake_done
+                                                 : {imem_addr_ff[`SCR1_XLEN-1:6], imem_addr_ff[5:2] + imem_handshake_done};
+    `endif
+`endif // SCR1_EARLY_BRANCH
 
 // Pending IMEM transactions counter
 //------------------------------------------------------------------------------
@@ -566,16 +640,22 @@ assign imem_pnd_txns_q_full   = &imem_pnd_txns_cnt;
 // In the 2nd case, since the IMEM responce was erroneous there is no guarantee
 // that subsequent IMEM instructions would be valid.
 
-assign imem_resp_discard_cnt_upd = exu2ifu_pc_new_req_i | imem_resp_er
+`ifdef SCR1_EARLY_BRANCH
+assign imem_resp_discard_cnt_upd = pc_new_req_internal | imem_resp_er
                                  | (imem_resp_ok & imem_resp_discard_req);
 
-always_ff @(posedge clk, negedge rst_n) begin
-    if (~rst_n) begin
-        imem_resp_discard_cnt <= '0;
-    end else if (imem_resp_discard_cnt_upd) begin
-        imem_resp_discard_cnt <= imem_resp_discard_cnt_next;
-    end
-end
+`ifndef SCR1_NEW_PC_REG
+assign imem_resp_discard_cnt_next = pc_new_req_internal     ? imem_pnd_txns_cnt_next - imem_handshake_done
+                                  : imem_resp_er_discard_pnd ? imem_pnd_txns_cnt_next
+                                                             : imem_resp_discard_cnt - 1'b1;
+`else // SCR1_NEW_PC_REG
+assign imem_resp_discard_cnt_next = pc_new_req_internal | imem_resp_er_discard_pnd
+                                  ? imem_pnd_txns_cnt_next
+                                  : imem_resp_discard_cnt - 1'b1;
+`endif
+`else
+assign imem_resp_discard_cnt_upd = exu2ifu_pc_new_req_i | imem_resp_er
+                                 | (imem_resp_ok & imem_resp_discard_req);
 
 `ifndef SCR1_NEW_PC_REG
 assign imem_resp_discard_cnt_next = exu2ifu_pc_new_req_i     ? imem_pnd_txns_cnt_next - imem_handshake_done
@@ -585,24 +665,45 @@ assign imem_resp_discard_cnt_next = exu2ifu_pc_new_req_i     ? imem_pnd_txns_cnt
 assign imem_resp_discard_cnt_next = exu2ifu_pc_new_req_i | imem_resp_er_discard_pnd
                                   ? imem_pnd_txns_cnt_next
                                   : imem_resp_discard_cnt - 1'b1;
-`endif // SCR1_NEW_PC_REG
+`endif
+`endif
 
-assign imem_vd_pnd_txns_cnt  = imem_pnd_txns_cnt - imem_resp_discard_cnt;
-assign imem_resp_discard_req = |imem_resp_discard_cnt;
+always_ff @(posedge clk, negedge rst_n) begin
+    if (~rst_n) begin
+        imem_resp_discard_cnt <= '0;
+    end else if (imem_resp_discard_cnt_upd) begin
+        imem_resp_discard_cnt <= imem_resp_discard_cnt_next;
+    end
+end
 
 // IFU <-> IMEM interface output signals
 //------------------------------------------------------------------------------
 
-`ifndef SCR1_NEW_PC_REG
-assign ifu2imem_req_o  = (exu2ifu_pc_new_req_i & ~imem_pnd_txns_q_full & ~pipe2ifu_stop_fetch_i)
-                       | (ifu_fsm_fetch        & ~imem_pnd_txns_q_full & q_has_free_slots);
-assign ifu2imem_addr_o = exu2ifu_pc_new_req_i
-                       ? {exu2ifu_pc_new_i[`SCR1_XLEN-1:2], 2'b00}
-                       : {imem_addr_ff, 2'b00};
-`else // SCR1_NEW_PC_REG
-assign ifu2imem_req_o  = ifu_fsm_fetch & ~imem_pnd_txns_q_full & q_has_free_slots;
-assign ifu2imem_addr_o = {imem_addr_ff, 2'b00};
-`endif // SCR1_NEW_PC_REG
+`ifdef SCR1_EARLY_BRANCH
+    `ifndef SCR1_NEW_PC_REG
+    assign ifu2imem_req_o  = (pc_new_req_internal & ~imem_pnd_txns_q_full & ~pipe2ifu_stop_fetch_i)
+                           | (ifu_fsm_fetch        & ~imem_pnd_txns_q_full & q_has_free_slots);
+    assign ifu2imem_addr_o = pc_new_req_internal
+                           ? {pc_new_addr_internal[`SCR1_XLEN-1:2], 2'b00}
+                           : {imem_addr_ff, 2'b00};
+    `else // SCR1_NEW_PC_REG
+    assign ifu2imem_req_o  = ifu_fsm_fetch & ~imem_pnd_txns_q_full & q_has_free_slots;
+    assign ifu2imem_addr_o = pc_new_req_internal
+                           ? {pc_new_addr_internal[`SCR1_XLEN-1:2], 2'b00}
+                           : {imem_addr_ff, 2'b00};
+    `endif
+`else // ~SCR1_EARLY_BRANCH
+    `ifndef SCR1_NEW_PC_REG
+    assign ifu2imem_req_o  = (exu2ifu_pc_new_req_i & ~imem_pnd_txns_q_full & ~pipe2ifu_stop_fetch_i)
+                           | (ifu_fsm_fetch        & ~imem_pnd_txns_q_full & q_has_free_slots);
+    assign ifu2imem_addr_o = exu2ifu_pc_new_req_i
+                           ? {exu2ifu_pc_new_i[`SCR1_XLEN-1:2], 2'b00}
+                           : {imem_addr_ff, 2'b00};
+    `else // SCR1_NEW_PC_REG
+    assign ifu2imem_req_o  = ifu_fsm_fetch & ~imem_pnd_txns_q_full & q_has_free_slots;
+    assign ifu2imem_addr_o = {imem_addr_ff, 2'b00};
+    `endif
+`endif
 
 assign ifu2imem_cmd_o  = SCR1_MEM_CMD_RD;
 
@@ -803,8 +904,12 @@ SCR1_SVA_IFU_IMEM_ERR_BEH : assert property (
 
 SCR1_SVA_IFU_NEW_PC_REQ_BEH : assert property (
     @(negedge clk) disable iff (~rst_n)
+`ifdef SCR1_EARLY_BRANCH
+    (exu2ifu_pc_new_req_i || pc_new_req_internal) |=> q_is_empty
+`else
     exu2ifu_pc_new_req_i |=> q_is_empty
-    ) else $error("IFU Error: incorrect behavior after exu2ifu_pc_new_req_i");
+`endif
+    ) else $error("IFU Error: incorrect behavior after new PC req");
 
 SCR1_SVA_IFU_IMEM_ADDR_ALIGNED : assert property (
     @(negedge clk) disable iff (~rst_n)
@@ -822,5 +927,9 @@ SCR1_SVA_IFU_IMEM_FAULT_RVI_HI : assert property (
     ) else $error("IFU Error: ifu2idu_imem_err_o == 0");
 
 `endif // SCR1_TRGT_SIMULATION
+
+`ifdef SCR1_EARLY_BRANCH
+assign ifu2idu_pc_o = {imem_addr_ff, 2'b00};
+`endif //SCR1_EARLY_BRANCH
 
 endmodule : scr1_pipe_ifu
