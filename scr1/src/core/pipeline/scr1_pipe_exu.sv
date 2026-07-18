@@ -732,7 +732,12 @@ assign exu2ifu_pc_new_req_o = init_pc                                        // 
 `ifdef SCR1_DBG_EN
                             | dbg_run_start_npbuf
 `endif // SCR1_DBG_EN
-                            | (exu_queue_vd & jb_taken);
+                            
+`ifdef SCR1_EARLY_BRANCH
+| (exu_queue_vd & jb_taken & ~exu_queue.early_branch_done)
+`else
+| (exu_queue_vd & jb_taken)
+`endif // SCR1_EARLY_BRANCH
 
 // Jump/branch signals
 assign branch_taken = exu_queue.branch_req & ialu_cmp;
