@@ -12,6 +12,13 @@ module scr1_pipe_mprf (
     input   logic                               rst_n,                      // MPRF reset
 `endif // SCR1_MPRF_RST_EN
     input   logic                               clk,                        // MPRF clock
+`ifdef SCR1_EARLY_BRANCH
+    // Additional IDU <-> MPRF interface
+    input  logic [`SCR1_MPRF_AWIDTH-1:0]        idu2mprf_rs1_addr_i,
+    output logic [`SCR1_XLEN-1:0]               mprf2idu_rs1_data_o,
+    input  logic [`SCR1_MPRF_AWIDTH-1:0]        idu2mprf_rs2_addr_i,
+    output logic [`SCR1_XLEN-1:0]               mprf2idu_rs2_data_o,
+`endif
 
     // EXU <-> MPRF interface
     input   logic [`SCR1_MPRF_AWIDTH-1:0]       exu2mprf_rs1_addr_i,        // MPRF rs1 read address
@@ -22,13 +29,6 @@ module scr1_pipe_mprf (
     input   logic [`SCR1_MPRF_AWIDTH-1:0]       exu2mprf_rd_addr_i,         // MPRF rd write address
     input   logic [`SCR1_XLEN-1:0]              exu2mprf_rd_data_i          // MPRF rd write data
 
-`ifdef SCR1_EARLY_BRANCH
-    // Additional IDU <-> MPRF interface
-    input  logic [`SCR1_MPRF_AWIDTH-1:0]        idu2mprf_rs1_addr_i,
-    output logic [`SCR1_XLEN-1:0]               mprf2idu_rs1_data_o,
-    input  logic [`SCR1_MPRF_AWIDTH-1:0]        idu2mprf_rs2_addr_i,
-    output logic [`SCR1_XLEN-1:0]               mprf2idu_rs2_data_o
-`endif
 );
 
 //-------------------------------------------------------------------------------
@@ -89,8 +89,11 @@ assign  wr_req_vd  =   exu2mprf_w_req_i & |exu2mprf_rd_addr_i;
 
 
 // control signals for IDU
+`ifdef SCR1_EARLY_BRANCH
+// control signals for IDU
 assign idu_rs1_addr_vd = |idu2mprf_rs1_addr_i;
 assign idu_rs2_addr_vd = |idu2mprf_rs2_addr_i;
+`endif
 
 // RAM implementation specific control signals
 `ifdef SCR1_MPRF_RAM
@@ -148,17 +151,9 @@ end
 // distributed logic implementation
 //------------------------------------------------------------------------------
 
-// EXU reading with bypass (forwarding) - async read
-assign mprf2exu_rs1_data_o = (rs1_addr_vd) 
-                               ? ((wr_req_vd && (exu2mprf_rs1_addr_i == exu2mprf_rd_addr_i)) 
-                                   ? exu2mprf_rd_data_i 
-                                   : mprf_int[exu2mprf_rs1_addr_i]) 
-                               : '0;
-assign mprf2exu_rs2_data_o = (rs2_addr_vd) 
-                               ? ((wr_req_vd && (exu2mprf_rs2_addr_i == exu2mprf_rd_addr_i)) 
-                                   ? exu2mprf_rd_data_i 
-                                   : mprf_int[exu2mprf_rs2_addr_i]) 
-                               : '0;
+// EXU reading - asynchronous, no bypass (original behavior)
+assign  mprf2exu_rs1_data_o = ( rs1_addr_vd ) ? mprf_int[exu2mprf_rs1_addr_i] : '0;
+assign  mprf2exu_rs2_data_o = ( rs2_addr_vd ) ? mprf_int[exu2mprf_rs2_addr_i] : '0;
 
 `ifdef SCR1_EARLY_BRANCH
 // IDU reading with bypass (we use already existing signal wr_req_vd)

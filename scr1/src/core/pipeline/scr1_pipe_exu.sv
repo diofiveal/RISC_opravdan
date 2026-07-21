@@ -252,6 +252,11 @@ logic [`SCR1_XLEN-1:0]              inc_pc;
 logic                               branch_taken;
 logic                               jb_taken;
 logic [`SCR1_XLEN-1:0]              jb_new_pc;
+`ifdef SCR1_EARLY_BRANCH
+logic                               early_branch_mispredict;
+logic                               branch_redirect_req;
+logic [`SCR1_XLEN-1:0]              branch_redirect_pc;
+`endif // SCR1_EARLY_BRANCH
 `ifndef SCR1_RVC_EXT
 logic                               jb_misalign;
 `endif
@@ -348,6 +353,10 @@ always_ff @(posedge clk) begin
         exu_queue.rd_wb_sel      <= idu2exu_cmd_i.rd_wb_sel;
         exu_queue.jump_req       <= idu2exu_cmd_i.jump_req;
         exu_queue.branch_req     <= idu2exu_cmd_i.branch_req;
+`ifdef SCR1_EARLY_BRANCH
+        exu_queue.early_branch_valid <= idu2exu_cmd_i.early_branch_valid;
+        exu_queue.early_branch_taken <= idu2exu_cmd_i.early_branch_taken;
+`endif // SCR1_EARLY_BRANCH
         exu_queue.mret_req       <= idu2exu_cmd_i.mret_req;
         exu_queue.fencei_req     <= idu2exu_cmd_i.fencei_req;
         exu_queue.wfi_req        <= idu2exu_cmd_i.wfi_req;
@@ -697,9 +706,16 @@ assign inc_pc = pc_curr_ff + (exu_queue.instr_rvc ? `SCR1_XLEN'd2 : `SCR1_XLEN'd
 assign inc_pc = pc_curr_ff + `SCR1_XLEN'd4;
 `endif // ~SCR1_RVC_EXT
 
+`ifdef SCR1_EARLY_BRANCH
+assign pc_curr_next = exu2ifu_pc_new_req_o        ? exu2ifu_pc_new_o
+                    : (exu_queue_vd & jb_taken)   ? jb_new_pc
+                    : (inc_pc[6] ^ pc_curr_ff[6]) ? inc_pc
+                                                  : {pc_curr_ff[`SCR1_XLEN-1:6], inc_pc[5:0]};
+`else // SCR1_EARLY_BRANCH
 assign pc_curr_next = exu2ifu_pc_new_req_o        ? exu2ifu_pc_new_o
                     : (inc_pc[6] ^ pc_curr_ff[6]) ? inc_pc
                                                   : {pc_curr_ff[`SCR1_XLEN-1:6], inc_pc[5:0]};
+`endif // SCR1_EARLY_BRANCH
 
 // New PC multiplexer
 //------------------------------------------------------------------------------
@@ -715,6 +731,10 @@ always_comb begin
 `endif // SCR1_DBG_EN
         wfi_run_start_ff    : exu2ifu_pc_new_o = pc_curr_ff;
         exu_queue.fencei_req: exu2ifu_pc_new_o = inc_pc;
+`ifdef SCR1_EARLY_BRANCH
+        early_branch_mispredict:
+            exu2ifu_pc_new_o = branch_redirect_pc;
+`endif // SCR1_EARLY_BRANCH
         default             : exu2ifu_pc_new_o = ialu_addr_res & SCR1_JUMP_MASK;
     endcase
 end
@@ -732,17 +752,34 @@ assign exu2ifu_pc_new_req_o = init_pc                                        // 
 `ifdef SCR1_DBG_EN
                             | dbg_run_start_npbuf
 `endif // SCR1_DBG_EN
-                            
 `ifdef SCR1_EARLY_BRANCH
-| (exu_queue_vd & jb_taken & ~exu_queue.early_branch_done)
-`else
-| (exu_queue_vd & jb_taken)
+                            | (exu_queue_vd & exu_queue.jump_req)
+                            | branch_redirect_req;
+`else // SCR1_EARLY_BRANCH
+                            | (exu_queue_vd & jb_taken);
 `endif // SCR1_EARLY_BRANCH
 
 // Jump/branch signals
 assign branch_taken = exu_queue.branch_req & ialu_cmp;
 assign jb_taken     = exu_queue.jump_req | branch_taken;
 assign jb_new_pc    = ialu_addr_res & SCR1_JUMP_MASK;
+
+`ifdef SCR1_EARLY_BRANCH
+// Verify the branch decision made earlier in IDU.
+assign early_branch_mispredict = exu_queue_vd
+                               & exu_queue.branch_req
+                               & exu_queue.early_branch_valid
+                               & (branch_taken != exu_queue.early_branch_taken);
+
+// Redirect if IDU did not resolve a taken branch, or if EXU detects a mismatch.
+assign branch_redirect_req = exu_queue_vd
+                           & exu_queue.branch_req
+                           & ((~exu_queue.early_branch_valid & branch_taken)
+                              | early_branch_mispredict);
+
+// Use the actual EXU result for recovery.
+assign branch_redirect_pc = branch_taken ? jb_new_pc : inc_pc;
+`endif // SCR1_EARLY_BRANCH
 
 // PC to be loaded on MRET from interrupt trap
 assign exu2csr_pc_next_o  = ~exu_queue_vd ? pc_curr_ff
@@ -1032,7 +1069,13 @@ assign update_pc_en = (init_pc | exu2pipe_instret_o | exu2csr_take_irq_o)
                     & ~hdu2exu_pc_advmt_dsbl_i & ~hdu2exu_no_commit_i
 `endif // SCR1_DBG_EN
                     ;
+`ifdef SCR1_EARLY_BRANCH
+assign update_pc    = exu2ifu_pc_new_req_o ? exu2ifu_pc_new_o
+                    : jb_taken             ? jb_new_pc
+                                           : inc_pc;
+`else // SCR1_EARLY_BRANCH
 assign update_pc    = exu2ifu_pc_new_req_o ? exu2ifu_pc_new_o : inc_pc;
+`endif // SCR1_EARLY_BRANCH
 
 
 //------------------------------------------------------------------------------

@@ -172,7 +172,6 @@ typedef struct packed {
     logic                               mret_req;
     logic                               fencei_req;
     logic                               wfi_req;
-    logic                               early_branch_done; // if branch has already been resolved in IDU
     logic [SCR1_GPR_FIELD_WIDTH-1:0]    rs1_addr;       // also used as zimm for CSRRxI instructions
     logic [SCR1_GPR_FIELD_WIDTH-1:0]    rs2_addr;
     logic [SCR1_GPR_FIELD_WIDTH-1:0]    rd_addr;
@@ -180,6 +179,10 @@ typedef struct packed {
                                                         // used as instruction field for illegal instruction exception
     logic                               exc_req;
     type_scr1_exc_code_e                exc_code;
+    `ifdef SCR1_EARLY_BRANCH
+    logic                               early_branch_valid;  // IDU proccessed the branch correctly
+    logic                               early_branch_taken;  // result of comparison in IDU
+    `endif // SCR1_EARLY_BRANCH
 } type_scr1_exu_cmd_s;
 
 `endif // SCR1_RISCV_ISA_DECODING_SVH

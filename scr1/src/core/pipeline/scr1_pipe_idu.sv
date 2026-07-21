@@ -33,7 +33,9 @@ module scr1_pipe_idu
     input   logic                           ifu2idu_imem_err_i,     // Instruction access fault exception
     input   logic                           ifu2idu_err_rvi_hi_i,   // 1 - imem fault when trying to fetch second half of an unaligned RVI instruction
     input   logic                           ifu2idu_vd_i,           // IFU request
-    input   logic [`SCR1_XLEN-1:0]          ifu2idu_pc_i,           // Getting PC from IFU
+`ifdef SCR1_EARLY_BRANCH
+    input logic [`SCR1_XLEN-1:0]            ifu2idu_pc_i,
+`endif // SCR1_EARLY_BRANCH
 
     // IDU <-> EXU interface
     output  logic                           idu2exu_req_o,          // IDU request
@@ -44,8 +46,6 @@ module scr1_pipe_idu
     output  logic                           idu2exu_use_rd_o,       // Instruction uses rd
     output  logic                           idu2exu_use_imm_o,      // Instruction uses immediate
 `endif // SCR1_NO_EXE_STAGE
-    input   logic                           exu2idu_rdy_i           // EXU ready for new data
-
 `ifdef SCR1_EARLY_BRANCH
     // Ports for reading MPRF
     output logic [`SCR1_MPRF_AWIDTH-1:0]   idu2mprf_rs1_addr_o,
@@ -55,8 +55,10 @@ module scr1_pipe_idu
 
     // Ports for requests to IFU
     output logic                           idu2ifu_branch_req_o,
-    output logic [`SCR1_XLEN-1:0]          idu2ifu_branch_target_o
+    output logic [`SCR1_XLEN-1:0]          idu2ifu_branch_target_o,
 `endif
+    input   logic                           exu2idu_rdy_i           // EXU ready for new data
+
 );
 
 //-------------------------------------------------------------------------------
@@ -87,9 +89,10 @@ logic                               rve_illegal;
 `endif  // SCR1_RVE_EXT
 
 `ifdef SCR1_EARLY_BRANCH
-logic branch_taken_early;
-logic branch_req_early;
-logic [`SCR1_XLEN-1:0] branch_target_early;
+logic                               branch_taken_early;
+logic                               branch_req_early;
+logic [`SCR1_XLEN-1:0]              branch_target_early;
+logic                               idu_accept;                // for handshake
 `endif //SCR1_EARLY_BRANCH
 
 //-------------------------------------------------------------------------------
@@ -132,6 +135,13 @@ always_comb begin
     idu2exu_cmd_o.imm         = '0;
     idu2exu_cmd_o.exc_req     = 1'b0;
     idu2exu_cmd_o.exc_code    = SCR1_EXC_CODE_INSTR_MISALIGN;
+`ifdef SCR1_EARLY_BRANCH
+    branch_taken_early               = 1'b0;
+    branch_target_early              = '0;
+    branch_req_early                 = 1'b0;
+    idu2exu_cmd_o.early_branch_valid = 1'b0;
+    idu2exu_cmd_o.early_branch_taken = 1'b0;
+`endif // SCR1_EARLY_BRANCH
 
     // Clock gating
     idu2exu_use_rs1_o         = 1'b0;
@@ -885,34 +895,6 @@ always_comb begin
 
     // At this point the instruction is fully decoded
     // given that no imem fault has happened
-`ifdef SCR1_EARLY_BRANCH
-    // ---- Counting new PC earlier ----
-    branch_taken_early  = 1'b0;
-    branch_target_early = '0;
-    branch_req_early    = 1'b0;
-
-    if (ifu2idu_vd_i && ~ifu2idu_imem_err_i && idu2exu_cmd_o.branch_req) begin
-        logic [`SCR1_XLEN-1:0] pc_curr;
-        pc_curr = ifu2idu_pc_i + (idu2exu_cmd_o.instr_rvc ? 32'd2 : 32'd4);
-        branch_target_early = pc_curr + idu2exu_cmd_o.imm;
-
-        case (idu2exu_cmd_o.ialu_cmd)
-            SCR1_IALU_CMD_SUB_EQ  : branch_taken_early = (mprf2idu_rs1_data_i == mprf2idu_rs2_data_i);
-            SCR1_IALU_CMD_SUB_NE  : branch_taken_early = (mprf2idu_rs1_data_i != mprf2idu_rs2_data_i);
-            SCR1_IALU_CMD_SUB_LT  : branch_taken_early = ($signed(mprf2idu_rs1_data_i) < $signed(mprf2idu_rs2_data_i));
-            SCR1_IALU_CMD_SUB_GE  : branch_taken_early = ($signed(mprf2idu_rs1_data_i) >= $signed(mprf2idu_rs2_data_i));
-            SCR1_IALU_CMD_SUB_LTU : branch_taken_early = (mprf2idu_rs1_data_i < mprf2idu_rs2_data_i);
-            SCR1_IALU_CMD_SUB_GEU : branch_taken_early = (mprf2idu_rs1_data_i >= mprf2idu_rs2_data_i);
-            default               : branch_taken_early = 1'b0;
-        endcase
-
-        branch_req_early = branch_taken_early;
-    end
-
-    idu2mprf_rs1_addr_o = idu2exu_cmd_o.rs1_addr;
-    idu2mprf_rs2_addr_o = idu2exu_cmd_o.rs2_addr;
-    idu2exu_cmd_o.early_branch_done = idu2exu_cmd_o.branch_req;
-`endif
 
     // Check illegal instruction
     if (
@@ -941,21 +923,81 @@ always_comb begin
 `endif // SCR1_NO_EXE_STAGE
 
 `ifndef SCR1_MTVAL_ILLEGAL_INSTR_EN
-        idu2exu_use_imm_o             = 1'b0;
-`else // SCR1_MTVAL_ILLEGAL_INSTR_EN
+
 `ifndef SCR1_NO_EXE_STAGE
-        idu2exu_use_imm_o             = 1'b1;
+        idu2exu_use_imm_o = 1'b0;
 `endif // SCR1_NO_EXE_STAGE
-        idu2exu_cmd_o.imm             = instr;
+
+`else // SCR1_MTVAL_ILLEGAL_INSTR_EN
+
+`ifndef SCR1_NO_EXE_STAGE
+        idu2exu_use_imm_o = 1'b1;
+`endif // SCR1_NO_EXE_STAGE
+
+        idu2exu_cmd_o.imm = instr;
+
 `endif // SCR1_MTVAL_ILLEGAL_INSTR_EN
 
         idu2exu_cmd_o.exc_req         = 1'b1;
         idu2exu_cmd_o.exc_code        = SCR1_EXC_CODE_ILLEGAL_INSTR;
     end
 
+`ifdef SCR1_EARLY_BRANCH
+    // ---- Counting new PC earlier ----
+
+    if (idu_accept
+    && ~ifu2idu_imem_err_i
+    && ~idu2exu_cmd_o.exc_req
+    && idu2exu_cmd_o.branch_req) begin
+
+    branch_target_early = ifu2idu_pc_i + idu2exu_cmd_o.imm;
+
+    case (idu2exu_cmd_o.ialu_cmd)
+        SCR1_IALU_CMD_SUB_EQ:
+            branch_taken_early =
+                (mprf2idu_rs1_data_i == mprf2idu_rs2_data_i);
+
+        SCR1_IALU_CMD_SUB_NE:
+            branch_taken_early =
+                (mprf2idu_rs1_data_i != mprf2idu_rs2_data_i);
+
+        SCR1_IALU_CMD_SUB_LT:
+            branch_taken_early =
+                ($signed(mprf2idu_rs1_data_i) <
+                 $signed(mprf2idu_rs2_data_i));
+
+        SCR1_IALU_CMD_SUB_GE:
+            branch_taken_early =
+                ($signed(mprf2idu_rs1_data_i) >=
+                 $signed(mprf2idu_rs2_data_i));
+
+        SCR1_IALU_CMD_SUB_LTU:
+            branch_taken_early =
+                (mprf2idu_rs1_data_i < mprf2idu_rs2_data_i);
+
+        SCR1_IALU_CMD_SUB_GEU:
+            branch_taken_early =
+                (mprf2idu_rs1_data_i >= mprf2idu_rs2_data_i);
+
+        default:
+            branch_taken_early = 1'b0;
+    endcase
+
+    idu2exu_cmd_o.early_branch_valid = 1'b1;
+    idu2exu_cmd_o.early_branch_taken = branch_taken_early;
+
+    // IFU перенаправляется только для taken
+    branch_req_early = branch_taken_early;
+end
+`endif // SCR1_EARLY_BRANCH
+
 end // RV32I(MC) decode
 
+
 `ifdef SCR1_EARLY_BRANCH
+assign idu2mprf_rs1_addr_o     = idu2exu_cmd_o.rs1_addr;
+assign idu2mprf_rs2_addr_o     = idu2exu_cmd_o.rs2_addr; 
+assign idu_accept              = ifu2idu_vd_i & exu2idu_rdy_i;
 assign idu2ifu_branch_req_o    = branch_req_early;
 assign idu2ifu_branch_target_o = branch_target_early;
 `endif

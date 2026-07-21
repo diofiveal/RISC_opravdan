@@ -57,6 +57,12 @@ module scr1_pipe_ifu
     input   logic                                   hdu2ifu_pbuf_err_i,         // Program Buffer Instruction i/f error
     input   logic [SCR1_HDU_CORE_INSTR_WIDTH-1:0]   hdu2ifu_pbuf_instr_i,       // Program Buffer Instruction itself
 `endif // SCR1_DBG_EN
+    
+`ifdef SCR1_EARLY_BRANCH
+    input  logic                                    idu2ifu_branch_req_i,
+    input  logic [`SCR1_XLEN-1:0]                   idu2ifu_branch_target_i,
+    output logic [`SCR1_XLEN-1:0]                   ifu2idu_pc_o,
+`endif //SCR1_EARLY_BRANCH
 
 `ifdef SCR1_CLKCTRL_EN
     output  logic                                   ifu2pipe_imem_txns_pnd_o,   // There are pending imem transactions
@@ -68,11 +74,7 @@ module scr1_pipe_ifu
     output  logic                                   ifu2idu_imem_err_o,         // Instruction access fault exception
     output  logic                                   ifu2idu_err_rvi_hi_o,       // 1 - imem fault when trying to fetch second half of an unaligned RVI instruction
     output  logic                                   ifu2idu_vd_o                // IFU request
-`ifdef SCR1_EARLY_BRANCH
-    input  logic                                    idu2ifu_branch_req_i,
-    input  logic [`SCR1_XLEN-1:0]                   idu2ifu_branch_target_i,
-    output logic [`SCR1_XLEN-1:0]                   ifu2idu_pc_o
-`endif
+
 );
 
 //------------------------------------------------------------------------------
@@ -138,9 +140,14 @@ typedef enum logic [2:0] {
 // Early branch signals
 //------------------------------------------------------------------------------
 `ifdef SCR1_EARLY_BRANCH
-logic                               pc_new_req_internal;
-logic [`SCR1_XLEN-1:0]              pc_new_addr_internal;
-`endif
+logic [`SCR1_XLEN-1:0] ifu_idu_pc_ff;
+logic [`SCR1_XLEN-1:0] ifu_idu_instr_size;
+logic                   ifu_idu_accept;
+logic                   ifu_idu_pc_advance;
+
+logic                   pc_new_req_internal;
+logic [`SCR1_XLEN-1:0] pc_new_addr_internal;
+`endif // SCR1_EARLY_BRANCH
 
 // Instruction queue signals
 //------------------------------------------------------------------------------
@@ -269,17 +276,39 @@ logic                               instr_bypass_vd;
  // - Status logic
 //
 
+`ifdef SCR1_EARLY_BRANCH
+
+assign ifu_idu_accept =
+       ifu2idu_vd_o
+     & idu2ifu_rdy_i;
+
+`ifdef SCR1_DBG_EN
+assign ifu_idu_pc_advance =
+       ifu_idu_accept
+     & ~hdu2ifu_pbuf_fetch_i;
+`else
+assign ifu_idu_pc_advance =
+       ifu_idu_accept;
+`endif // SCR1_DBG_EN
+
+assign ifu_idu_instr_size =
+    (ifu2idu_instr_o[1:0] == 2'b11)
+    ? `SCR1_XLEN'd4
+    : `SCR1_XLEN'd2;
+
+`endif // SCR1_EARLY_BRANCH
+
 // Priority to EARLY_BRANCH
 `ifdef SCR1_EARLY_BRANCH
 always_comb begin
-    if (idu2ifu_branch_req_i) begin
-        pc_new_req_internal = 1'b1;
-        pc_new_addr_internal = idu2ifu_branch_target_i;
-    end else if (exu2ifu_pc_new_req_i) begin
-        pc_new_req_internal = 1'b1;
+    if (exu2ifu_pc_new_req_i) begin
+        pc_new_req_internal  = 1'b1;
         pc_new_addr_internal = exu2ifu_pc_new_i;
+    end else if (idu2ifu_branch_req_i) begin
+        pc_new_req_internal  = 1'b1;
+        pc_new_addr_internal = idu2ifu_branch_target_i;
     end else begin
-        pc_new_req_internal = 1'b0;
+        pc_new_req_internal  = 1'b0;
         pc_new_addr_internal = '0;
     end
 end
@@ -289,8 +318,24 @@ end
 //------------------------------------------------------------------------------
 `ifdef SCR1_EARLY_BRANCH
 assign new_pc_unaligned_upd = pc_new_req_internal | imem_resp_vd;
-'else
+`else
 assign new_pc_unaligned_upd = exu2ifu_pc_new_req_i | imem_resp_vd;
+`endif // SCR1_EARLY_BRANCH
+
+`ifdef SCR1_EARLY_BRANCH
+
+always_ff @(posedge clk, negedge rst_n) begin
+    if (~rst_n) begin
+        ifu_idu_pc_ff <= SCR1_RST_VECTOR;
+    end else if (pc_new_req_internal) begin
+        ifu_idu_pc_ff <= pc_new_addr_internal;
+    end else if (ifu_idu_pc_advance) begin
+        ifu_idu_pc_ff <= ifu_idu_pc_ff + ifu_idu_instr_size;
+    end
+end
+
+assign ifu2idu_pc_o = ifu_idu_pc_ff;
+
 `endif // SCR1_EARLY_BRANCH
 
 always_ff @(posedge clk, negedge rst_n) begin
@@ -667,6 +712,7 @@ assign imem_resp_discard_cnt_next = exu2ifu_pc_new_req_i | imem_resp_er_discard_
                                   : imem_resp_discard_cnt - 1'b1;
 `endif
 `endif
+assign imem_vd_pnd_txns_cnt  = imem_pnd_txns_cnt - imem_resp_discard_cnt;
 
 always_ff @(posedge clk, negedge rst_n) begin
     if (~rst_n) begin
@@ -927,9 +973,5 @@ SCR1_SVA_IFU_IMEM_FAULT_RVI_HI : assert property (
     ) else $error("IFU Error: ifu2idu_imem_err_o == 0");
 
 `endif // SCR1_TRGT_SIMULATION
-
-`ifdef SCR1_EARLY_BRANCH
-assign ifu2idu_pc_o = {imem_addr_ff, 2'b00};
-`endif //SCR1_EARLY_BRANCH
 
 endmodule : scr1_pipe_ifu
