@@ -100,15 +100,6 @@ module scr1_pipe_top (
     // Fuse
     input   logic [`SCR1_XLEN-1:0]                      soc2pipe_fuse_mhartid_i     // Fuse MHARTID value
 
-`ifdef SCR1_EARLY_BRANCH                                // New ports for connections
-logic [`SCR1_XLEN-1:0]                                  ifu2idu_pc;
-logic                                                   idu2ifu_branch_req;
-logic [`SCR1_XLEN-1:0]                                  idu2ifu_branch_target;
-logic [`SCR1_XLEN-1:0]                                  mprf2idu_rs1_data;
-logic [`SCR1_XLEN-1:0]                                  mprf2idu_rs2_data;
-logic [`SCR1_MPRF_AWIDTH-1:0]                           idu2mprf_rs1_addr;
-logic [`SCR1_MPRF_AWIDTH-1:0]                           idu2mprf_rs2_addr;
-`endif //SCR1_EARLY_BRANCH
 );
 
 //-------------------------------------------------------------------------------
@@ -282,6 +273,16 @@ logic                                       exu_busy;
 logic                                       pipe2clkctl_wake_req_o;
 `endif // SCR1_CLKCTRL_EN
 
+`ifdef SCR1_EARLY_BRANCH
+logic [`SCR1_XLEN-1:0] ifu2idu_pc;
+logic                   idu2ifu_branch_req;
+logic [`SCR1_XLEN-1:0] idu2ifu_branch_target;
+logic [`SCR1_XLEN-1:0] mprf2idu_rs1_data;
+logic [`SCR1_XLEN-1:0] mprf2idu_rs2_data;
+logic [`SCR1_MPRF_AWIDTH-1:0] idu2mprf_rs1_addr;
+logic [`SCR1_MPRF_AWIDTH-1:0] idu2mprf_rs2_addr;
+`endif
+
 //-------------------------------------------------------------------------------
 // Pipeline logic
 //-------------------------------------------------------------------------------
@@ -338,8 +339,9 @@ scr1_pipe_ifu i_pipe_ifu (
 `ifdef SCR1_EARLY_BRANCH
     .ifu2idu_pc_o            (ifu2idu_pc),
     .idu2ifu_branch_req_i    (idu2ifu_branch_req),
-    .idu2ifu_branch_target_i (idu2ifu_branch_target)
+    .idu2ifu_branch_target_i (idu2ifu_branch_target),
 `endif // SCR1_EARLY_BRANCH
+
     // IFU <-> IDU interface
     .idu2ifu_rdy_i            (idu2ifu_rdy        ),
     .ifu2idu_instr_o          (ifu2idu_instr      ),
@@ -377,7 +379,7 @@ scr1_pipe_idu i_pipe_idu (
     .idu2mprf_rs2_addr_o     (idu2mprf_rs2_addr),
     .mprf2idu_rs2_data_i     (mprf2idu_rs2_data),
     .idu2ifu_branch_req_o    (idu2ifu_branch_req),
-    .idu2ifu_branch_target_o (idu2ifu_branch_target)
+    .idu2ifu_branch_target_o (idu2ifu_branch_target),
 `endif // SCR1_EARLY_BRANCH
     .exu2idu_rdy_i          (exu2idu_rdy       )
 );
@@ -502,6 +504,12 @@ scr1_pipe_mprf i_pipe_mprf (
     .rst_n                  (pipe_rst_n       ),
 `endif // SCR1_MPRF_RST_EN
     .clk                    (clk              ),
+`ifdef SCR1_EARLY_BRANCH
+    .idu2mprf_rs1_addr_i     (idu2mprf_rs1_addr),
+    .mprf2idu_rs1_data_o     (mprf2idu_rs1_data),
+    .idu2mprf_rs2_addr_i     (idu2mprf_rs2_addr),
+    .mprf2idu_rs2_data_o     (mprf2idu_rs2_data),
+`endif // SCR1_EARLY_BRANCH
 
     // EXU <-> MPRF interface
     .exu2mprf_rs1_addr_i    (exu2mprf_rs1_addr),
@@ -512,12 +520,6 @@ scr1_pipe_mprf i_pipe_mprf (
     .exu2mprf_rd_addr_i     (exu2mprf_rd_addr ),
     .exu2mprf_rd_data_i     (exu2mprf_rd_data )
 
-`ifdef SCR1_EARLY_BRANCH
-    .idu2mprf_rs1_addr_i     (idu2mprf_rs1_addr),
-    .mprf2idu_rs1_data_o     (mprf2idu_rs1_data),
-    .idu2mprf_rs2_addr_i     (idu2mprf_rs2_addr),
-    .mprf2idu_rs2_data_o     (mprf2idu_rs2_data)
-`endif // SCR1_EARLY_BRANCH
 );
 
 //-------------------------------------------------------------------------------
