@@ -274,13 +274,25 @@ logic                                       pipe2clkctl_wake_req_o;
 `endif // SCR1_CLKCTRL_EN
 
 `ifdef SCR1_EARLY_BRANCH
-logic [`SCR1_XLEN-1:0] ifu2idu_pc;
-logic                   idu2ifu_branch_req;
-logic [`SCR1_XLEN-1:0] idu2ifu_branch_target;
-logic [`SCR1_XLEN-1:0] mprf2idu_rs1_data;
-logic [`SCR1_XLEN-1:0] mprf2idu_rs2_data;
-logic [`SCR1_MPRF_AWIDTH-1:0] idu2mprf_rs1_addr;
-logic [`SCR1_MPRF_AWIDTH-1:0] idu2mprf_rs2_addr;
+logic [`SCR1_XLEN-1:0]                      ifu2idu_pc;
+logic                                       idu2ifu_branch_req;
+logic [`SCR1_XLEN-1:0]                      idu2ifu_branch_target;
+logic [`SCR1_XLEN-1:0]                      mprf2idu_rs1_data;
+logic [`SCR1_XLEN-1:0]                      mprf2idu_rs2_data;
+logic [`SCR1_MPRF_AWIDTH-1:0]               idu2mprf_rs1_addr;
+logic [`SCR1_MPRF_AWIDTH-1:0]               idu2mprf_rs2_addr;
+`endif
+
+`ifdef SCR1_MEM_STAGE_EN
+
+logic                                        exu2mem_req;
+logic                                        mem2exu_rdy;
+type_scr1_lsu_cmd_sel_e                      exu2mem_lsu_cmd;
+logic [`SCR1_XLEN-1:0]                       exu2mem_addr;
+logic [`SCR1_XLEN-1:0]                       exu2mem_sdata;
+logic [`SCR1_MPRF_AWIDTH-1:0]                exu2mem_rd_addr;
+logic [`SCR1_XLEN-1:0]                       exu2mem_pc;
+
 `endif
 
 //-------------------------------------------------------------------------------
@@ -495,7 +507,26 @@ scr1_pipe_exu i_pipe_exu (
     .exu2ifu_pc_new_req_o           (new_pc_req              ),
     .exu2ifu_pc_new_o               (new_pc                  )
 );
+//-------------------------------------------------------------------------------
+// Memory unit
+//-------------------------------------------------------------------------------
+`ifdef SCR1_MEM_STAGE_EN
 
+scr1_pipe_mem i_pipe_mem (
+    .rst_n              (pipe_rst_n),
+    .clk                (clk),
+
+    .exu2mem_req_i      (exu2mem_req),
+    .exu2mem_lsu_cmd_i  (exu2mem_lsu_cmd),
+    .exu2mem_addr_i     (exu2mem_addr),
+    .exu2mem_sdata_i    (exu2mem_sdata),
+    .exu2mem_rd_addr_i  (exu2mem_rd_addr),
+    .exu2mem_pc_i       (exu2mem_pc),
+
+    .mem2exu_rdy_o      (mem2exu_rdy)
+);
+
+`endif
 //-------------------------------------------------------------------------------
 // Multi-port register file
 //-------------------------------------------------------------------------------

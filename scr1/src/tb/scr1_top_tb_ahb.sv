@@ -19,7 +19,7 @@ module scr1_top_tb_ahb (
 // Local parameters
 //-------------------------------------------------------------------------------
 localparam                          SCR1_MEM_SIZE       = 1024*1024;
-localparam                          TIMEOUT             = 'd2000_000;//20ms;
+localparam                          TIMEOUT             = 'd1_600_000_000;//20ms;
 localparam                          ARCH                = 'h1;
 localparam                          COMPLIANCE          = 'h2;
 localparam                          ADDR_START          = 'h200;
@@ -388,6 +388,17 @@ scr1_memory_tb_ahb #(
     .dmem_hrdata            (dmem_hrdata),
     .dmem_hresp             (dmem_hresp )
 );
+// Debug logging
+// Отладка раннего ветвления: ловим инструкции branch и смотрим, почему нет запроса
+// `ifdef SCR1_EARLY_BRANCH
+// // Отладка: фиксируем каждый запрос от IDU к IFU
+// always @(posedge clk) begin
+//     if (rst_n && i_top.i_core_top.i_pipe_top.idu2ifu_branch_req) begin
+//         $display("[%0t] IDU early branch request: target=%h",
+//                  $time, i_top.i_core_top.i_pipe_top.idu2ifu_branch_target);
+//     end
+// end
+// `endif
 
 endmodule : scr1_top_tb_ahb
 

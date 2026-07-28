@@ -155,6 +155,17 @@ module scr1_pipe_exu (
 `ifdef SCR1_CLKCTRL_EN
     output  logic                               exu2pipe_wfi_halted_o,      // WFI halted state
 `endif // SCR1_CLKCTRL_EN
+`ifdef SCR1_MEM_STAGE_EN
+
+    output  logic                               exu2mem_req_o,
+    output  type_scr1_lsu_cmd_sel_e             exu2mem_lsu_cmd_o,
+    output  logic [`SCR1_XLEN-1:0]              exu2mem_addr_o,
+    output  logic [`SCR1_XLEN-1:0]              exu2mem_sdata_o,
+    output  logic [`SCR1_MPRF_AWIDTH-1:0]       exu2mem_rd_addr_o,
+    output  logic [`SCR1_XLEN-1:0]              exu2mem_pc_o,
+    input   logic                               mem2exu_rdy_i,
+
+`endif
     output  logic [`SCR1_XLEN-1:0]              exu2pipe_pc_curr_o,         // Current PC
     output  logic [`SCR1_XLEN-1:0]              exu2csr_pc_next_o,          // Next PC
     output  logic                               exu2ifu_pc_new_req_o,       // New PC request
