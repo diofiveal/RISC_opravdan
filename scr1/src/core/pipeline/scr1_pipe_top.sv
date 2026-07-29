@@ -285,13 +285,18 @@ logic [`SCR1_MPRF_AWIDTH-1:0]               idu2mprf_rs2_addr;
 
 `ifdef SCR1_MEM_STAGE_EN
 
-logic                                        exu2mem_req;
-logic                                        mem2exu_rdy;
-type_scr1_lsu_cmd_sel_e                      exu2mem_lsu_cmd;
-logic [`SCR1_XLEN-1:0]                       exu2mem_addr;
-logic [`SCR1_XLEN-1:0]                       exu2mem_sdata;
-logic [`SCR1_MPRF_AWIDTH-1:0]                exu2mem_rd_addr;
-logic [`SCR1_XLEN-1:0]                       exu2mem_pc;
+// EXU -> MEM
+logic                               exu2mem_req;
+type_scr1_lsu_cmd_sel_e             exu2mem_lsu_cmd;
+logic [`SCR1_XLEN-1:0]              exu2mem_addr;
+logic [`SCR1_XLEN-1:0]              exu2mem_sdata;
+
+// MEM -> EXU
+logic                               mem2exu_rdy;
+logic                               mem2exu_done;
+logic [`SCR1_XLEN-1:0]              mem2exu_ldata;
+logic                               mem2exu_exc;
+type_scr1_exc_code_e                mem2exu_exc_code;
 
 `endif
 
@@ -449,6 +454,8 @@ scr1_pipe_exu i_pipe_exu (
     .csr2exu_mstatus_mie_up_i       (csr2exu_mstatus_mie_up  ),
 
     // EXU <-> DMEM interface
+`ifndef SCR1_MEM_STAGE_EN
+
     .exu2dmem_req_o                 (pipe2dmem_req_o         ),
     .exu2dmem_cmd_o                 (pipe2dmem_cmd_o         ),
     .exu2dmem_width_o               (pipe2dmem_width_o       ),
@@ -457,6 +464,19 @@ scr1_pipe_exu i_pipe_exu (
     .dmem2exu_req_ack_i             (dmem2pipe_req_ack_i     ),
     .dmem2exu_rdata_i               (dmem2pipe_rdata_i       ),
     .dmem2exu_resp_i                (dmem2pipe_resp_i        ),
+
+`else
+
+    .exu2dmem_req_o                 (                        ),
+    .exu2dmem_cmd_o                 (                        ),
+    .exu2dmem_width_o               (                        ),
+    .exu2dmem_addr_o                (                        ),
+    .exu2dmem_wdata_o               (                        ),
+    .dmem2exu_req_ack_i             (1'b0                    ),
+    .dmem2exu_rdata_i               ('0                      ),
+    .dmem2exu_resp_i                (SCR1_MEM_RESP_NOTRDY    ),
+
+`endif
 
 `ifdef SCR1_DBG_EN
     // EXU <-> HDU interface
@@ -477,14 +497,18 @@ scr1_pipe_exu i_pipe_exu (
     .exu2tdu_imon_o                 (exu2tdu_i_mon           ),
     .tdu2exu_ibrkpt_match_i         (tdu2exu_i_match         ),
     .tdu2exu_ibrkpt_exc_req_i       (tdu2exu_i_x_req         ),
+`ifdef SCR1_MEM_STAGE_EN
+    .lsu2tdu_dmon_o                 (                        ),
+  `else // SCR1_MEM_STAGE_EN
     .lsu2tdu_dmon_o                 (lsu2tdu_d_mon           ),
+  `endif
     .tdu2lsu_ibrkpt_exc_req_i       (tdu2lsu_i_x_req         ),
     .tdu2lsu_dbrkpt_match_i         (tdu2lsu_d_match         ),
     .tdu2lsu_dbrkpt_exc_req_i       (tdu2lsu_d_x_req         ),
     .exu2tdu_ibrkpt_ret_o           (exu2tdu_bp_retire       ),
- `ifdef SCR1_DBG_EN
+  `ifdef SCR1_DBG_EN
     .exu2hdu_ibrkpt_hw_o            (brkpt_hw                ),
- `endif // SCR1_DBG_EN
+  `endif // SCR1_DBG_EN
 `endif // SCR1_TDU_EN
 
     // EXU control
@@ -502,6 +526,19 @@ scr1_pipe_exu i_pipe_exu (
 `ifdef SCR1_CLKCTRL_EN
     .exu2pipe_wfi_halted_o          (wfi_halted              ),
 `endif // SCR1_CLKCTRL_EN
+`ifdef SCR1_MEM_STAGE_EN
+    // EXU <-> MEM
+    .exu2mem_req_o                  (exu2mem_req             ),
+    .exu2mem_lsu_cmd_o              (exu2mem_lsu_cmd         ),
+    .exu2mem_addr_o                 (exu2mem_addr            ),
+    .exu2mem_sdata_o                (exu2mem_sdata           ),
+
+    .mem2exu_rdy_i                  (mem2exu_rdy             ),
+    .mem2exu_done_i                 (mem2exu_done            ),
+    .mem2exu_ldata_i                (mem2exu_ldata           ),
+    .mem2exu_exc_i                  (mem2exu_exc             ),
+    .mem2exu_exc_code_i             (mem2exu_exc_code        ),
+`endif // SCR1_MEM_STAGE_EN
     .exu2pipe_pc_curr_o             (curr_pc                 ),
     .exu2csr_pc_next_o              (next_pc                 ),
     .exu2ifu_pc_new_req_o           (new_pc_req              ),
@@ -513,20 +550,42 @@ scr1_pipe_exu i_pipe_exu (
 `ifdef SCR1_MEM_STAGE_EN
 
 scr1_pipe_mem i_pipe_mem (
-    .rst_n              (pipe_rst_n),
-    .clk                (clk),
+    .rst_n                      (pipe_rst_n),
+    .clk                        (clk),
 
-    .exu2mem_req_i      (exu2mem_req),
-    .exu2mem_lsu_cmd_i  (exu2mem_lsu_cmd),
-    .exu2mem_addr_i     (exu2mem_addr),
-    .exu2mem_sdata_i    (exu2mem_sdata),
-    .exu2mem_rd_addr_i  (exu2mem_rd_addr),
-    .exu2mem_pc_i       (exu2mem_pc),
+    // EXU -> MEM
+    .exu2mem_req_i              (exu2mem_req),
+    .exu2mem_lsu_cmd_i          (exu2mem_lsu_cmd),
+    .exu2mem_addr_i             (exu2mem_addr),
+    .exu2mem_sdata_i            (exu2mem_sdata),
 
-    .mem2exu_rdy_o      (mem2exu_rdy)
+    // MEM -> EXU
+    .mem2exu_rdy_o              (mem2exu_rdy),
+    .mem2exu_done_o             (mem2exu_done),
+    .mem2exu_ldata_o            (mem2exu_ldata),
+    .mem2exu_exc_o              (mem2exu_exc),
+    .mem2exu_exc_code_o         (mem2exu_exc_code),
+
+`ifdef SCR1_TDU_EN
+    // Existing top-level TDU signals
+    .mem2tdu_dmon_o             (lsu2tdu_d_mon),
+    .tdu2mem_ibrkpt_exc_req_i   (tdu2lsu_i_x_req),
+    .tdu2mem_dbrkpt_exc_req_i   (tdu2lsu_d_x_req),
+`endif
+
+    // MEM owns the external DMEM interface
+    .mem2dmem_req_o             (pipe2dmem_req_o),
+    .mem2dmem_cmd_o             (pipe2dmem_cmd_o),
+    .mem2dmem_width_o           (pipe2dmem_width_o),
+    .mem2dmem_addr_o            (pipe2dmem_addr_o),
+    .mem2dmem_wdata_o           (pipe2dmem_wdata_o),
+
+    .dmem2mem_req_ack_i         (dmem2pipe_req_ack_i),
+    .dmem2mem_rdata_i           (dmem2pipe_rdata_i),
+    .dmem2mem_resp_i            (dmem2pipe_resp_i)
 );
 
-`endif
+`endif // SCR1_MEM_STAGE_EN
 //-------------------------------------------------------------------------------
 // Multi-port register file
 //-------------------------------------------------------------------------------

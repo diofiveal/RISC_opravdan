@@ -156,15 +156,18 @@ module scr1_pipe_exu (
     output  logic                               exu2pipe_wfi_halted_o,      // WFI halted state
 `endif // SCR1_CLKCTRL_EN
 `ifdef SCR1_MEM_STAGE_EN
-
+    // EXU -> MEM
     output  logic                               exu2mem_req_o,
     output  type_scr1_lsu_cmd_sel_e             exu2mem_lsu_cmd_o,
     output  logic [`SCR1_XLEN-1:0]              exu2mem_addr_o,
     output  logic [`SCR1_XLEN-1:0]              exu2mem_sdata_o,
-    output  logic [`SCR1_MPRF_AWIDTH-1:0]       exu2mem_rd_addr_o,
-    output  logic [`SCR1_XLEN-1:0]              exu2mem_pc_o,
-    input   logic                               mem2exu_rdy_i,
 
+    // MEM -> EXU
+    input   logic                               mem2exu_rdy_i,
+    input   logic                               mem2exu_done_i,
+    input   logic [`SCR1_XLEN-1:0]              mem2exu_ldata_i,
+    input   logic                               mem2exu_exc_i,
+    input   type_scr1_exc_code_e                mem2exu_exc_code_i,
 `endif
     output  logic [`SCR1_XLEN-1:0]              exu2pipe_pc_curr_o,         // Current PC
     output  logic [`SCR1_XLEN-1:0]              exu2csr_pc_next_o,          // Next PC
@@ -811,6 +814,40 @@ assign exu2pipe_pc_curr_o = pc_curr_ff;
 
 assign lsu_req  = ((exu_queue.lsu_cmd != SCR1_LSU_CMD_NONE) & exu_queue_vd);
 
+`ifdef SCR1_MEM_STAGE_EN
+
+// Send the memory instruction to MEM only when MEM is empty.
+// Because EXU keeps exu_queue valid until done, this becomes
+// a one-cycle launch pulse.
+assign exu2mem_req_o =
+       lsu_req
+     & mem2exu_rdy_i;
+
+assign exu2mem_lsu_cmd_o = exu_queue.lsu_cmd;
+assign exu2mem_addr_o    = ialu_addr_res;
+assign exu2mem_sdata_o   = mprf2exu_rs2_data_i;
+
+// Preserve the old EXU logic by making MEM look like the old LSU
+assign lsu_rdy      = mem2exu_done_i;
+assign lsu_l_data   = mem2exu_ldata_i;
+assign lsu_exc_req  = mem2exu_exc_i;
+assign lsu_exc_code = mem2exu_exc_code_i;
+
+// EXU no longer owns DMEM in this configuration
+assign exu2dmem_req_o   = 1'b0;
+assign exu2dmem_cmd_o   = SCR1_MEM_CMD_RD;
+assign exu2dmem_width_o = SCR1_MEM_WIDTH_WORD;
+assign exu2dmem_addr_o  = '0;
+assign exu2dmem_wdata_o = '0;
+
+`ifdef SCR1_TDU_EN
+// Real data monitor now comes from MEM.
+// This old EXU output will not be connected in pipe_top.
+assign lsu2tdu_dmon_o = '0;
+`endif
+
+`else // SCR1_MEM_STAGE_EN
+
 scr1_pipe_lsu i_lsu(
     .rst_n                      (rst_n                   ),
     .clk                        (clk                     ),
@@ -842,6 +879,10 @@ scr1_pipe_lsu i_lsu(
     .dmem2lsu_rdata_i           (dmem2exu_rdata_i        ),       // DMEM read data
     .dmem2lsu_resp_i            (dmem2exu_resp_i         )        // DMEM response
 );
+
+
+`endif // SCR1_MEM_STAGE_EN
+
 
 //------------------------------------------------------------------------------
 // EXU status logic
