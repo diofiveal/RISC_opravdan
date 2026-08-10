@@ -161,6 +161,9 @@ module scr1_pipe_exu (
     output  type_scr1_lsu_cmd_sel_e             exu2mem_lsu_cmd_o,
     output  logic [`SCR1_XLEN-1:0]              exu2mem_addr_o,
     output  logic [`SCR1_XLEN-1:0]              exu2mem_sdata_o,
+    output  logic [`SCR1_MPRF_AWIDTH-1:0]       exu2mem_rd_addr_o,
+    output  logic [`SCR1_XLEN-1:0]              exu2mem_pc_o,
+    output  logic                               exu2mem_rd_w_req_o,
 
     // MEM -> EXU
     input   logic                               mem2exu_rdy_i,
@@ -168,6 +171,10 @@ module scr1_pipe_exu (
     input   logic [`SCR1_XLEN-1:0]              mem2exu_ldata_i,
     input   logic                               mem2exu_exc_i,
     input   type_scr1_exc_code_e                mem2exu_exc_code_i,
+    input   logic [`SCR1_MPRF_AWIDTH-1:0]       mem2exu_rd_addr_i,
+    input   logic                               mem2exu_rd_w_req_i,
+    input   logic [`SCR1_XLEN-1:0]              mem2exu_pc_i, 
+    input   logic [`SCR1_XLEN-1:0]              mem2exu_addr_i,
 `endif
     output  logic [`SCR1_XLEN-1:0]              exu2pipe_pc_curr_o,         // Current PC
     output  logic [`SCR1_XLEN-1:0]              exu2csr_pc_next_o,          // Next PC
@@ -307,6 +314,36 @@ scr1_csr_access_e                   csr_access_ff;
 scr1_csr_access_e                   csr_access_next;
 logic                               csr_access_init;
 
+`ifdef SCR1_MEM_STAGE_EN
+logic                               lsu_load_req;         // For activating flag that points to use rd
+logic                               load_wb_req;
+logic                               exu_stage_rdy;
+logic                               mem_pending;
+logic                               mem_accept;
+
+logic                               mem_retire;
+logic                               exu_local_retire;
+logic                               exu_local_exc_req;    // Local exception from EXU
+logic                               exu_commit;
+
+logic                               exu_pc_advance;
+logic                               load_raw_hazard;
+
+logic                               wb_vd_ff;
+logic [`SCR1_MPRF_AWIDTH-1:0]       wb_rd_addr_ff;
+logic [`SCR1_XLEN-1:0]              wb_rd_data_ff;
+logic [`SCR1_XLEN-1:0]              wb_pc_ff;
+
+logic                               wb_bufferable;
+logic                               wb_push;
+logic [`SCR1_XLEN-1:0]              wb_push_data;
+
+logic                               wb_commit;
+logic                               wb_retire;
+logic                               wb_raw_hazard;
+logic                               exu_order_block;
+`endif // SCR1_MEM_STAGE_EN
+
 //------------------------------------------------------------------------------
 // Instruction execution queue
 //------------------------------------------------------------------------------
@@ -339,7 +376,16 @@ assign exu_queue_en = exu2idu_rdy_o & idu2exu_req_i;
 // EXU queue valid flag register
 //------------------------------------------------------------------------------
 
-assign exu_queue_vd_upd = exu_queue_barrier | exu_rdy;
+`ifdef SCR1_MEM_STAGE_EN
+assign exu_queue_vd_upd =
+       exu_queue_barrier
+     | exu_stage_rdy
+     | mem2exu_exc_i;
+`else
+assign exu_queue_vd_upd =
+       exu_queue_barrier
+     | exu_rdy;
+`endif
 
 always_ff @(posedge clk, negedge rst_n) begin
     if (~rst_n) begin
@@ -423,12 +469,17 @@ assign exu_queue     = idu2exu_cmd_i;
 //------------------------------------------------------------------------------
 
 `ifdef SCR1_RVM_EXT
-assign ialu_vd  = exu_queue_vd & (exu_queue.ialu_cmd != SCR1_IALU_CMD_NONE)
+assign ialu_vd  = exu_queue_vd
+                & (exu_queue.ialu_cmd != SCR1_IALU_CMD_NONE)
+`ifdef SCR1_MEM_STAGE_EN
+                & ~load_raw_hazard
+                & ~wb_raw_hazard
+`endif
 `ifdef SCR1_TDU_EN
                 & ~tdu2exu_ibrkpt_exc_req_i
-`endif // SCR1_TDU_EN
+`endif
                 ;
-`endif // SCR1_RVM_EXT
+`endif
 
 always_comb begin
 `ifdef SCR1_RVM_EXT
@@ -503,17 +554,46 @@ assign jb_misalign  = exu_queue_vd  & jb_taken & |jb_new_pc[1:0];
 `endif // ~SCR1_RVC_EXT
 
 // Exception request
-assign exu_exc_req  = exu_queue_vd & (exu_queue.exc_req | lsu_exc_req
-                                                        | csr2exu_rw_exc_i
+`ifdef SCR1_MEM_STAGE_EN
+
+// Исключения инструкции, которая сейчас находится в EXU
+assign exu_local_exc_req =
+       exu_queue_vd
+     & (exu_queue.exc_req
+      | csr2exu_rw_exc_i
 `ifndef SCR1_RVC_EXT
-                                                        | jb_misalign
-`endif // ~SCR1_RVC_EXT
+      | jb_misalign
+`endif
 `ifdef SCR1_TDU_EN
   `ifdef SCR1_DBG_EN
-                                                        | exu2hdu_ibrkpt_hw_o
-  `endif // SCR1_DBG_EN
-`endif // SCR1_TDU_EN
-                                                        );
+      | exu2hdu_ibrkpt_hw_o
+  `endif
+`endif
+       );
+
+// Исключение из MEM не зависит от содержимого exu_queue
+assign exu_exc_req =
+       mem2exu_exc_i
+     | (exu_local_exc_req & ~exu_order_block);
+
+`else // SCR1_MEM_STAGE_EN
+
+assign exu_exc_req =
+       exu_queue_vd
+     & (exu_queue.exc_req
+      | lsu_exc_req
+      | csr2exu_rw_exc_i
+`ifndef SCR1_RVC_EXT
+      | jb_misalign
+`endif
+`ifdef SCR1_TDU_EN
+  `ifdef SCR1_DBG_EN
+      | exu2hdu_ibrkpt_hw_o
+  `endif
+`endif
+       );
+
+`endif // SCR1_MEM_STAGE_EN
 
 // EXU exception request register
 //------------------------------------------------------------------------------
@@ -536,19 +616,38 @@ assign exu_exc_req_next = hdu2exu_dbg_halt2run_i ? 1'b0 : exu_exc_req;
 
 always_comb begin
     case (1'b1)
+
+`ifdef SCR1_MEM_STAGE_EN
+        lsu_exc_req:
+            exc_code = lsu_exc_code;
+`endif
+
 `ifdef SCR1_TDU_EN
   `ifdef SCR1_DBG_EN
-        exu2hdu_ibrkpt_hw_o: exc_code = SCR1_EXC_CODE_BREAKPOINT;
-  `endif // SCR1_DBG_EN
-`endif // SCR1_TDU_EN
-        exu_queue.exc_req  : exc_code = exu_queue.exc_code;
-        lsu_exc_req        : exc_code = lsu_exc_code;
-        csr2exu_rw_exc_i   : exc_code = SCR1_EXC_CODE_ILLEGAL_INSTR;
+        exu2hdu_ibrkpt_hw_o:
+            exc_code = SCR1_EXC_CODE_BREAKPOINT;
+  `endif
+`endif
+
+        exu_queue.exc_req:
+            exc_code = exu_queue.exc_code;
+
+`ifndef SCR1_MEM_STAGE_EN
+        lsu_exc_req:
+            exc_code = lsu_exc_code;
+`endif
+
+        csr2exu_rw_exc_i:
+            exc_code = SCR1_EXC_CODE_ILLEGAL_INSTR;
+
 `ifndef SCR1_RVC_EXT
-        jb_misalign        : exc_code = SCR1_EXC_CODE_INSTR_MISALIGN;
-`endif // ~SCR1_RVC_EXT
-        default            : exc_code = SCR1_EXC_CODE_ECALL_M;
-    endcase // 1'b1
+        jb_misalign:
+            exc_code = SCR1_EXC_CODE_INSTR_MISALIGN;
+`endif
+
+        default:
+            exc_code = SCR1_EXC_CODE_ECALL_M;
+    endcase
 end
 
 // Exception trap value multiplexer
@@ -584,7 +683,13 @@ always_comb begin
         SCR1_EXC_CODE_BREAKPOINT: begin
             case (1'b1)
                 tdu2exu_ibrkpt_exc_req_i: exc_trap_val = pc_curr_ff;
-                tdu2lsu_dbrkpt_exc_req_i: exc_trap_val = ialu_addr_res;
+                tdu2lsu_dbrkpt_exc_req_i: begin
+                `ifdef SCR1_MEM_STAGE_EN
+                  exc_trap_val = mem2exu_addr_i;
+                `else
+                  exc_trap_val = ialu_addr_res;
+                `endif
+end
                 default                 : exc_trap_val = '0;
             endcase
         end
@@ -592,7 +697,13 @@ always_comb begin
         SCR1_EXC_CODE_LD_ADDR_MISALIGN,
         SCR1_EXC_CODE_LD_ACCESS_FAULT,
         SCR1_EXC_CODE_ST_ADDR_MISALIGN,
-        SCR1_EXC_CODE_ST_ACCESS_FAULT   : exc_trap_val = ialu_addr_res;
+        SCR1_EXC_CODE_ST_ACCESS_FAULT: begin
+`ifdef SCR1_MEM_STAGE_EN
+    exc_trap_val = mem2exu_addr_i;
+`else
+    exc_trap_val = ialu_addr_res;
+`endif
+end
         default                         : exc_trap_val = '0;
     endcase // exc_code
 end
@@ -613,6 +724,14 @@ end
 
 assign wfi_halt_cond = ~csr2exu_ip_ie_i
                      & ((exu_queue_vd & exu_queue.wfi_req) | wfi_run_start_ff)
+`ifdef SCR1_MEM_STAGE_EN
+                     & ~exu_order_block
+`endif
+`ifdef SCR1_DBG_EN
+                     & ~hdu2exu_no_commit_i
+                     & ~hdu2exu_dmode_sstep_en_i
+                     & ~hdu2exu_dbg_run2halt_i
+`endif
 `ifdef SCR1_DBG_EN
                      & ~hdu2exu_no_commit_i & ~hdu2exu_dmode_sstep_en_i & ~hdu2exu_dbg_run2halt_i
 `endif // SCR1_DBG_EN
@@ -699,12 +818,33 @@ assign init_pc = ~init_pc_v[3] & init_pc_v[2];
 // Current PC register
 //------------------------------------------------------------------------------
 
+`ifdef SCR1_MEM_STAGE_EN
+
+assign pc_curr_upd =
+       (exu_pc_advance
+      | exu2csr_take_irq_o
+      | exu2csr_take_exc_o
+`ifdef SCR1_DBG_EN
+      | dbg_run_start_npbuf
+`endif
+       )
+`ifdef SCR1_DBG_EN
+     & ~hdu2exu_pc_advmt_dsbl_i
+     & ~hdu2exu_no_commit_i
+`endif
+       ;
+
+`else
+
+// Старое выражение без изменений
 assign pc_curr_upd = ((exu2pipe_instret_o | exu2csr_take_irq_o
 `ifdef SCR1_DBG_EN
-                   | dbg_run_start_npbuf) & ( ~hdu2exu_pc_advmt_dsbl_i
-                                            & ~hdu2exu_no_commit_i
-`endif // SCR1_DBG_EN
+                   | dbg_run_start_npbuf) & (~hdu2exu_pc_advmt_dsbl_i
+                                           & ~hdu2exu_no_commit_i
+`endif
                    ));
+
+`endif
 
 always_ff @(negedge rst_n, posedge clk) begin
     if (~rst_n) begin
@@ -767,10 +907,24 @@ assign exu2ifu_pc_new_req_o = init_pc                                        // 
                             | dbg_run_start_npbuf
 `endif // SCR1_DBG_EN
 `ifdef SCR1_EARLY_BRANCH
-                            | (exu_queue_vd & exu_queue.jump_req)
-                            | branch_redirect_req;
-`else // SCR1_EARLY_BRANCH
-                            | (exu_queue_vd & jb_taken);
+                            | (exu_queue_vd
+                               & exu_queue.jump_req
+`ifdef SCR1_MEM_STAGE_EN
+                               & ~exu_order_block
+`endif
+                              )
+                            | (branch_redirect_req
+`ifdef SCR1_MEM_STAGE_EN
+                               & ~exu_order_block
+`endif
+                              );
+`else
+                            | (exu_queue_vd
+                               & jb_taken
+`ifdef SCR1_MEM_STAGE_EN
+                               & ~exu_order_block
+`endif
+                              );
 `endif // SCR1_EARLY_BRANCH
 
 // Jump/branch signals
@@ -799,7 +953,14 @@ assign branch_redirect_pc = branch_taken ? jb_new_pc : inc_pc;
 assign exu2csr_pc_next_o  = ~exu_queue_vd ? pc_curr_ff
                           : jb_taken      ? jb_new_pc
                                           : inc_pc;
+`ifdef SCR1_MEM_STAGE_EN
+assign exu2pipe_pc_curr_o =
+    lsu_exc_req
+        ? mem2exu_pc_i
+        : pc_curr_ff;
+`else
 assign exu2pipe_pc_curr_o = pc_curr_ff;
+`endif
 
 //------------------------------------------------------------------------------
 // Load/Store Unit (LSU)
@@ -812,16 +973,176 @@ assign exu2pipe_pc_curr_o = pc_curr_ff;
  //
 //------------------------------------------------------------------------------
 
-assign lsu_req  = ((exu_queue.lsu_cmd != SCR1_LSU_CMD_NONE) & exu_queue_vd);
+`ifdef SCR1_MEM_STAGE_EN
+
+assign lsu_req =
+       (exu_queue.lsu_cmd != SCR1_LSU_CMD_NONE)
+     & exu_queue_vd
+     & ~exu_order_block;
+
+`else
+
+assign lsu_req =
+       (exu_queue.lsu_cmd != SCR1_LSU_CMD_NONE)
+     & exu_queue_vd;
+
+`endif
 
 `ifdef SCR1_MEM_STAGE_EN
 
 // Send the memory instruction to MEM only when MEM is empty.
 // Because EXU keeps exu_queue valid until done, this becomes
 // a one-cycle launch pulse.
-assign exu2mem_req_o =
-       lsu_req
-     & mem2exu_rdy_i;
+assign lsu_load_req =
+       (exu_queue.lsu_cmd == SCR1_LSU_CMD_LB )
+     | (exu_queue.lsu_cmd == SCR1_LSU_CMD_LBU)
+     | (exu_queue.lsu_cmd == SCR1_LSU_CMD_LH )
+     | (exu_queue.lsu_cmd == SCR1_LSU_CMD_LHU)
+     | (exu_queue.lsu_cmd == SCR1_LSU_CMD_LW );
+
+assign exu2mem_req_o = mem_accept;
+
+assign load_raw_hazard =
+       mem_pending
+     & mem2exu_rd_w_req_i
+     & (mem2exu_rd_addr_i != '0)
+     & exu_queue_vd
+     & (
+          (
+            idu2exu_use_rs1_ff
+            & (exu_queue.rs1_addr[`SCR1_MPRF_AWIDTH-1:0]
+               == mem2exu_rd_addr_i)
+          )
+        | (
+            idu2exu_use_rs2_ff
+            & (exu_queue.rs2_addr[`SCR1_MPRF_AWIDTH-1:0]
+               == mem2exu_rd_addr_i)
+          )
+       );
+
+assign wb_raw_hazard =
+       wb_vd_ff
+     & (wb_rd_addr_ff != '0)
+     & exu_queue_vd
+     & (
+          (
+            idu2exu_use_rs1_ff
+            & (exu_queue.rs1_addr[`SCR1_MPRF_AWIDTH-1:0]
+               == wb_rd_addr_ff)
+          )
+        | (
+            idu2exu_use_rs2_ff
+            & (exu_queue.rs2_addr[`SCR1_MPRF_AWIDTH-1:0]
+               == wb_rd_addr_ff)
+          )
+       );
+
+// For now buffer only simple instructions without architectural
+// side effects other than MPRF writeback.
+assign wb_bufferable =
+       exu_queue_vd
+     & ~lsu_req
+     & ~load_raw_hazard
+     & ~wb_raw_hazard
+     & ~exu_local_exc_req
+     & (exu_queue.csr_cmd == SCR1_CSR_CMD_NONE)
+     & ~exu_queue.jump_req
+     & ~exu_queue.branch_req
+     & ~exu_queue.mret_req
+     & ~exu_queue.fencei_req
+     & ~exu_queue.wfi_req
+     & (
+          (exu_queue.rd_wb_sel == SCR1_RD_WB_IALU)
+        | (exu_queue.rd_wb_sel == SCR1_RD_WB_SUM2)
+        | (exu_queue.rd_wb_sel == SCR1_RD_WB_IMM)
+       );
+
+always_comb begin
+    case (exu_queue.rd_wb_sel)
+        SCR1_RD_WB_SUM2:
+            wb_push_data = ialu_addr_res;
+
+        SCR1_RD_WB_IMM:
+            wb_push_data = exu_queue.imm;
+
+        default:
+            wb_push_data = ialu_main_res;
+    endcase
+end
+
+assign wb_push =
+       mem_pending
+     & wb_bufferable
+     & exu_rdy
+     & ~wb_vd_ff;
+
+assign wb_commit =
+       wb_vd_ff
+     & ~mem_pending
+`ifdef SCR1_DBG_EN
+     & ~hdu2exu_no_commit_i
+`endif
+       ;
+
+assign wb_retire = wb_commit;
+
+always_ff @(posedge clk, negedge rst_n) begin
+    if (~rst_n) begin
+        wb_vd_ff      <= 1'b0;
+        wb_rd_addr_ff <= '0;
+        wb_rd_data_ff <= '0;
+        wb_pc_ff      <= '0;
+    end else begin
+        // Older memory instruction faulted:
+        // younger buffered result must disappear.
+        if (mem2exu_exc_i) begin
+            wb_vd_ff <= 1'b0;
+
+        end else if (wb_commit) begin
+            // Result has been architecturally committed.
+            wb_vd_ff <= 1'b0;
+
+        end else if (wb_push) begin
+            wb_vd_ff      <= 1'b1;
+            wb_rd_addr_ff <=
+                `SCR1_MPRF_AWIDTH'(exu_queue.rd_addr);
+            wb_rd_data_ff <= wb_push_data;
+            wb_pc_ff      <= pc_curr_ff;
+        end
+    end
+end
+
+assign mem_retire =
+       mem2exu_done_i;
+
+assign exu_local_retire =
+       exu_queue_vd
+     & ~lsu_req
+     & exu_commit;
+
+assign exu2mem_rd_addr_o =
+    `SCR1_MPRF_AWIDTH'(exu_queue.rd_addr);
+
+assign exu2mprf_rd_addr_o =
+    load_wb_req
+        ? mem2exu_rd_addr_i
+        : wb_commit
+            ? wb_rd_addr_ff
+            : `SCR1_MPRF_AWIDTH'(exu_queue.rd_addr);
+
+assign load_wb_req =
+     mem2exu_done_i
+     & mem2exu_rd_w_req_i
+     & ~mem2exu_exc_i;
+
+assign exu2mem_pc_o       = pc_curr_ff;
+
+assign exu_pc_advance =
+       mem_accept
+     | wb_push
+     | exu_local_retire;
+
+assign exu2mem_rd_w_req_o = lsu_load_req & exu_queue_vd;
 
 assign exu2mem_lsu_cmd_o = exu_queue.lsu_cmd;
 assign exu2mem_addr_o    = ialu_addr_res;
@@ -840,6 +1161,48 @@ assign exu2dmem_width_o = SCR1_MEM_WIDTH_WORD;
 assign exu2dmem_addr_o  = '0;
 assign exu2dmem_wdata_o = '0;
 
+assign mem_pending = ~mem2exu_rdy_i;
+
+assign exu_order_block =
+       mem_pending
+     | wb_vd_ff;
+
+assign mem_accept =
+       lsu_req
+     & mem2exu_rdy_i;
+
+assign exu_commit =
+       exu_rdy
+     & ~mem_pending
+     & ~wb_vd_ff;
+
+always_comb begin
+    case (1'b1)
+        lsu_req: begin
+            exu_stage_rdy = mem2exu_rdy_i;
+        end
+
+`ifdef SCR1_RVM_EXT
+        ialu_vd: begin
+            exu_stage_rdy =
+                   wb_push
+                 | exu_commit;
+        end
+`endif
+
+        csr2exu_mstatus_mie_up_i: begin
+            exu_stage_rdy = 1'b0;
+        end
+
+        default: begin
+            exu_stage_rdy =
+                   wb_push
+                 | exu_commit;
+        end
+    endcase
+end
+
+
 `ifdef SCR1_TDU_EN
 // Real data monitor now comes from MEM.
 // This old EXU output will not be connected in pipe_top.
@@ -847,6 +1210,8 @@ assign lsu2tdu_dmon_o = '0;
 `endif
 
 `else // SCR1_MEM_STAGE_EN
+assign exu2mprf_rd_addr_o =
+    `SCR1_MPRF_AWIDTH'(exu_queue.rd_addr);
 
 scr1_pipe_lsu i_lsu(
     .rst_n                      (rst_n                   ),
@@ -901,11 +1266,48 @@ always_comb begin
 end
 
 assign exu2pipe_init_pc_o       = init_pc;
-assign exu2idu_rdy_o            = exu_rdy & ~exu_queue_barrier;
+`ifdef SCR1_MEM_STAGE_EN
+assign exu2idu_rdy_o =
+       exu_stage_rdy
+     & ~exu_queue_barrier
+     & ~mem2exu_exc_i;
+`else
+assign exu2idu_rdy_o =
+       exu_rdy
+     & ~exu_queue_barrier;
+`endif
 assign exu2pipe_exu_busy_o      = exu_queue_vd & ~exu_rdy;
-assign exu2pipe_instret_o       = exu_queue_vd & exu_rdy;
+`ifdef SCR1_MEM_STAGE_EN
+
+assign exu2pipe_instret_o =
+       mem_retire
+     | wb_retire
+     | exu_local_retire;
+
+`else
+
+assign exu2pipe_instret_o =
+       exu_queue_vd
+     & exu_rdy;
+
+`endif // SCR1_MEM_STAGE_EN
 `ifndef SCR1_CSR_REDUCED_CNT
-assign exu2csr_instret_no_exc_o = exu2pipe_instret_o & ~exu_exc_req;
+
+`ifdef SCR1_MEM_STAGE_EN
+
+assign exu2csr_instret_no_exc_o =
+       (exu_local_retire & ~exu_exc_req)
+     | (mem_retire       & ~mem2exu_exc_i)
+     | wb_retire;
+
+`else
+
+assign exu2csr_instret_no_exc_o =
+       exu2pipe_instret_o
+     & ~exu_exc_req;
+
+`endif // SCR1_MEM_STAGE_EN
+
 `endif // SCR1_CSR_REDUCED_CNT
 
 // Exceptions
@@ -962,25 +1364,77 @@ assign exu2mprf_rs2_addr_o = mprf_rs2_req ? mprf_rs2_addr[`SCR1_MPRF_AWIDTH-1:0]
 
 // Write back stage
 //------------------------------------------------------------------------------
+`ifdef SCR1_MEM_STAGE_EN
 
-assign exu2mprf_w_req_o   = (exu_queue.rd_wb_sel != SCR1_RD_WB_NONE) & exu_queue_vd & ~exu_exc_req
+always_comb begin
+    if (load_wb_req) begin
+        exu2mprf_w_req_o =
+               load_wb_req
 `ifdef SCR1_DBG_EN
-                          & ~hdu2exu_no_commit_i
-`endif // SCR1_DBG_EN
-                          & ((exu_queue.rd_wb_sel == SCR1_RD_WB_CSR) ? csr_access_init : exu_rdy);
+             & ~hdu2exu_no_commit_i
+`endif
+             ;
 
-assign exu2mprf_rd_addr_o = `SCR1_MPRF_AWIDTH'(exu_queue.rd_addr);
+    end else if (wb_commit) begin
+        exu2mprf_w_req_o = 1'b1;
+
+    end else begin
+        exu2mprf_w_req_o =
+               (exu_queue.rd_wb_sel != SCR1_RD_WB_NONE)
+             & exu_queue_vd
+             & ~exu_exc_req
+             & ~mem_pending
+             & ~wb_vd_ff
+`ifdef SCR1_DBG_EN
+             & ~hdu2exu_no_commit_i
+`endif
+             & ((exu_queue.rd_wb_sel == SCR1_RD_WB_CSR)
+                    ? csr_access_init
+                    : exu_rdy);
+    end
+end
+
+`else
+
+assign exu2mprf_w_req_o =
+       (exu_queue.rd_wb_sel != SCR1_RD_WB_NONE)
+     & exu_queue_vd
+     & ~exu_exc_req
+`ifdef SCR1_DBG_EN
+     & ~hdu2exu_no_commit_i
+`endif
+     & ((exu_queue.rd_wb_sel == SCR1_RD_WB_CSR)
+            ? csr_access_init
+            : exu_rdy);
+
+`endif
+
+// assign exu2mprf_rd_addr_o = `SCR1_MPRF_AWIDTH'(exu_queue.rd_addr);
 
 // MRPF RD data multiplexer
 always_comb begin
-    case (exu_queue.rd_wb_sel)
-        SCR1_RD_WB_SUM2  : exu2mprf_rd_data_o = ialu_addr_res;
-        SCR1_RD_WB_IMM   : exu2mprf_rd_data_o = exu_queue.imm;
-        SCR1_RD_WB_INC_PC: exu2mprf_rd_data_o = inc_pc;
-        SCR1_RD_WB_LSU   : exu2mprf_rd_data_o = lsu_l_data;
-        SCR1_RD_WB_CSR   : exu2mprf_rd_data_o = csr2exu_r_data_i;
-        default          : exu2mprf_rd_data_o = ialu_main_res;
-    endcase
+`ifdef SCR1_MEM_STAGE_EN
+    if (load_wb_req) begin
+        exu2mprf_rd_data_o = mem2exu_ldata_i;
+
+    end else if (wb_commit) begin
+        exu2mprf_rd_data_o = wb_rd_data_ff;
+
+    end else begin
+`endif
+
+        case (exu_queue.rd_wb_sel)
+            SCR1_RD_WB_SUM2  : exu2mprf_rd_data_o = ialu_addr_res;
+            SCR1_RD_WB_IMM   : exu2mprf_rd_data_o = exu_queue.imm;
+            SCR1_RD_WB_INC_PC: exu2mprf_rd_data_o = inc_pc;
+            SCR1_RD_WB_LSU   : exu2mprf_rd_data_o = lsu_l_data;
+            SCR1_RD_WB_CSR   : exu2mprf_rd_data_o = csr2exu_r_data_i;
+            default          : exu2mprf_rd_data_o = ialu_main_res;
+        endcase
+
+`ifdef SCR1_MEM_STAGE_EN
+    end
+`endif
 end
 
 //------------------------------------------------------------------------------
@@ -1002,9 +1456,12 @@ end
 // CSR write/read request signals calculation
 always_comb begin
     if (~exu_queue_vd
+`ifdef SCR1_MEM_STAGE_EN
+       | exu_order_block
+`endif
 `ifdef SCR1_TDU_EN
        | tdu2exu_ibrkpt_exc_req_i
-`endif // SCR1_TDU_EN
+`endif
     ) begin
         exu2csr_r_req_o = 1'b0;
         exu2csr_w_req_o = 1'b0;
@@ -1065,6 +1522,9 @@ assign exu2csr_trap_val_o = exc_trap_val;
 
 // Interrupts signals
 assign exu2csr_take_irq_o = csr2exu_irq_i & ~exu2pipe_exu_busy_o
+`ifdef SCR1_MEM_STAGE_EN
+     & ~exu_order_block
+`endif
 `ifdef SCR1_DBG_EN
                           & ~hdu2exu_irq_dsbl_i
                           & ~hdu2exu_dbg_halted_i
@@ -1076,7 +1536,12 @@ assign exu2csr_take_irq_o = csr2exu_irq_i & ~exu2pipe_exu_busy_o
 
 // MRET signals
 // MRET instruction flag
-assign exu2csr_mret_instr_o  = exu_queue_vd & exu_queue.mret_req
+assign exu2csr_mret_instr_o =
+       exu_queue_vd
+     & exu_queue.mret_req
+`ifdef SCR1_MEM_STAGE_EN
+     & ~exu_order_block
+`endif
 `ifdef SCR1_TDU_EN
                              & ~tdu2exu_ibrkpt_exc_req_i
 `endif // SCR1_TDU_EN

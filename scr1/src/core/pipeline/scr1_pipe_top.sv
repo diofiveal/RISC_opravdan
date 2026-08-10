@@ -290,11 +290,18 @@ logic                               exu2mem_req;
 type_scr1_lsu_cmd_sel_e             exu2mem_lsu_cmd;
 logic [`SCR1_XLEN-1:0]              exu2mem_addr;
 logic [`SCR1_XLEN-1:0]              exu2mem_sdata;
+logic [`SCR1_MPRF_AWIDTH-1:0]       exu2mem_rd_addr;
+logic [`SCR1_XLEN-1:0]              exu2mem_pc;
+logic                               exu2mem_rd_w_req;
 
 // MEM -> EXU
 logic                               mem2exu_rdy;
 logic                               mem2exu_done;
 logic [`SCR1_XLEN-1:0]              mem2exu_ldata;
+logic [`SCR1_MPRF_AWIDTH-1:0]       mem2exu_rd_addr;
+logic                               mem2exu_rd_w_req;
+logic [`SCR1_XLEN-1:0]              mem2exu_pc;
+logic [`SCR1_XLEN-1:0]              mem2exu_addr;
 logic                               mem2exu_exc;
 type_scr1_exc_code_e                mem2exu_exc_code;
 
@@ -465,6 +472,7 @@ scr1_pipe_exu i_pipe_exu (
     .dmem2exu_rdata_i               (dmem2pipe_rdata_i       ),
     .dmem2exu_resp_i                (dmem2pipe_resp_i        ),
 
+
 `else
 
     .exu2dmem_req_o                 (                        ),
@@ -532,12 +540,21 @@ scr1_pipe_exu i_pipe_exu (
     .exu2mem_lsu_cmd_o              (exu2mem_lsu_cmd         ),
     .exu2mem_addr_o                 (exu2mem_addr            ),
     .exu2mem_sdata_o                (exu2mem_sdata           ),
+    .exu2mem_rd_addr_o              (exu2mem_rd_addr         ),
+    .exu2mem_pc_o                   (exu2mem_pc              ),
+    .exu2mem_rd_w_req_o             (exu2mem_rd_w_req        ),
+    
 
     .mem2exu_rdy_i                  (mem2exu_rdy             ),
     .mem2exu_done_i                 (mem2exu_done            ),
     .mem2exu_ldata_i                (mem2exu_ldata           ),
     .mem2exu_exc_i                  (mem2exu_exc             ),
     .mem2exu_exc_code_i             (mem2exu_exc_code        ),
+    .mem2exu_rd_addr_i              (mem2exu_rd_addr         ),
+    .mem2exu_rd_w_req_i             (mem2exu_rd_w_req        ),
+    .mem2exu_pc_i                   (mem2exu_pc              ),
+    .mem2exu_addr_i                 (mem2exu_addr            ),
+
 `endif // SCR1_MEM_STAGE_EN
     .exu2pipe_pc_curr_o             (curr_pc                 ),
     .exu2csr_pc_next_o              (next_pc                 ),
@@ -554,17 +571,24 @@ scr1_pipe_mem i_pipe_mem (
     .clk                        (clk),
 
     // EXU -> MEM
-    .exu2mem_req_i              (exu2mem_req),
-    .exu2mem_lsu_cmd_i          (exu2mem_lsu_cmd),
-    .exu2mem_addr_i             (exu2mem_addr),
-    .exu2mem_sdata_i            (exu2mem_sdata),
+    .exu2mem_req_i              (exu2mem_req             ),
+    .exu2mem_lsu_cmd_i          (exu2mem_lsu_cmd         ),
+    .exu2mem_addr_i             (exu2mem_addr            ),
+    .exu2mem_sdata_i            (exu2mem_sdata           ),
+    .exu2mem_rd_addr_i          (exu2mem_rd_addr         ),
+    .exu2mem_pc_i               (exu2mem_pc              ),
+    .exu2mem_rd_w_req_i         (exu2mem_rd_w_req        ),
 
     // MEM -> EXU
-    .mem2exu_rdy_o              (mem2exu_rdy),
-    .mem2exu_done_o             (mem2exu_done),
-    .mem2exu_ldata_o            (mem2exu_ldata),
-    .mem2exu_exc_o              (mem2exu_exc),
-    .mem2exu_exc_code_o         (mem2exu_exc_code),
+    .mem2exu_rdy_o              (mem2exu_rdy             ),
+    .mem2exu_done_o             (mem2exu_done            ),
+    .mem2exu_ldata_o            (mem2exu_ldata           ),
+    .mem2exu_exc_o              (mem2exu_exc             ),
+    .mem2exu_exc_code_o         (mem2exu_exc_code        ),
+    .mem2exu_rd_addr_o          (mem2exu_rd_addr         ),
+    .mem2exu_rd_w_req_o         (mem2exu_rd_w_req        ),
+    .mem2exu_pc_o               (mem2exu_pc              ),
+    .mem2exu_addr_o             (mem2exu_addr            ),
 
 `ifdef SCR1_TDU_EN
     // Existing top-level TDU signals
