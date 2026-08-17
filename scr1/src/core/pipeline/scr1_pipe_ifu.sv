@@ -713,6 +713,7 @@ assign imem_resp_discard_cnt_next = exu2ifu_pc_new_req_i | imem_resp_er_discard_
 `endif
 `endif
 assign imem_vd_pnd_txns_cnt  = imem_pnd_txns_cnt - imem_resp_discard_cnt;
+assign imem_resp_discard_req = |imem_resp_discard_cnt;
 
 always_ff @(posedge clk, negedge rst_n) begin
     if (~rst_n) begin
