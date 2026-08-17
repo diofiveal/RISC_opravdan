@@ -312,3 +312,11 @@ clean:
 #	$(MAKE) -C $(tst_dir)/riscv_compliance clean
 #	$(MAKE) -C $(tst_dir)/riscv_arch clean
 #	$(RM) $(test_info)
+
+#create point to start icache_tb
+.PHONY: run_icache_tb
+
+run_icache_tb:
+	$(MAKE) -C $(root_dir)/sim \
+		build_icache_tb \
+		SIM_BUILD_OPTS="$(SIM_BUILD_OPTS)"
