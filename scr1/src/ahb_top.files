@@ -6,3 +6,10 @@ top/scr1_timer.sv
 top/scr1_dmem_ahb.sv
 top/scr1_imem_ahb.sv
 top/scr1_top_ahb.sv
+
+top/icache.sv
+top/icache_controller.sv
+top/scr1_icache_top.sv
+top/dcache.sv
+top/dcache_controller.sv
+top/scr1_dcache_top.sv
