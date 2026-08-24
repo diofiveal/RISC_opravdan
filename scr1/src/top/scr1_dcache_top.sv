@@ -2,8 +2,8 @@
 `include "scr1_arch_description.svh"
 
 module scr1_dcache #(
-    parameter int unsigned DCACHE_SIZE_BYTES = 4096,
-    parameter int unsigned DCACHE_LINE_BYTES = 16,
+    parameter int unsigned DCACHE_SIZE_BYTES = 2048,
+    parameter int unsigned DCACHE_LINE_BYTES = 8,
     parameter int unsigned DCACHE_WAYS       = 1
 ) (
     input  logic                         clk,

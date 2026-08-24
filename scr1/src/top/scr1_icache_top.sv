@@ -2,9 +2,10 @@
 `include "scr1_arch_description.svh"
 
 module scr1_icache #(
-    parameter int unsigned ICACHE_SIZE_BYTES = 4096,
-    parameter int unsigned ICACHE_LINE_BYTES = 16,
-    parameter int unsigned ICACHE_WAYS       = 1
+    parameter int unsigned ICACHE_SIZE_BYTES   = 2048,
+    parameter int unsigned ICACHE_LINE_BYTES   = 8,
+    parameter int unsigned ICACHE_WAYS         = 1,
+    parameter int unsigned ICACHE_VICTIM_LINES = 4
 ) (
     input  logic                         clk,
     input  logic                         rst_n,
@@ -45,6 +46,8 @@ module scr1_icache #(
         (ICACHE_LINE_WORDS > 1) ? $clog2(ICACHE_LINE_WORDS) : 1;
     localparam int unsigned ICACHE_BYTE_OFFSET_BITS =
         (ICACHE_WORD_BYTES > 1) ? $clog2(ICACHE_WORD_BYTES) : 1;
+    localparam int unsigned ICACHE_VICTIM_ENTRY_BITS =
+        (ICACHE_VICTIM_LINES > 1) ? $clog2(ICACHE_VICTIM_LINES) : 1;
 
     // ICACHE_WAYS is kept for top-level compatibility. The current cache is
     // still direct mapped; this refactor changes structure, not associativity.
@@ -67,6 +70,27 @@ module scr1_icache #(
     logic                                     cache_line_commit;
     logic [ICACHE_INDEX_BITS-1:0]             cache_line_commit_index;
     logic [ICACHE_TAG_BITS-1:0]               cache_line_commit_tag;
+
+    // Controller <-> victim cache
+    logic                                     victim_lookup_en;
+    logic [ICACHE_TAG_BITS-1:0]               victim_lookup_tag;
+    logic [ICACHE_INDEX_BITS-1:0]             victim_lookup_index;
+    logic [ICACHE_WORD_OFFSET_BITS-1:0]       victim_lookup_word_offset;
+    logic                                     victim_lookup_hit;
+    logic [ICACHE_VICTIM_ENTRY_BITS-1:0]      victim_lookup_entry;
+    logic [ICACHE_DATA_WIDTH-1:0]             victim_lookup_data;
+    logic [ICACHE_LINE_WORDS*ICACHE_DATA_WIDTH-1:0]
+                                              victim_lookup_line;
+
+    logic                                     victim_write_en;
+    logic [ICACHE_VICTIM_ENTRY_BITS-1:0]      victim_write_entry;
+    logic [ICACHE_TAG_BITS-1:0]               victim_write_tag;
+    logic [ICACHE_INDEX_BITS-1:0]             victim_write_index;
+    logic [ICACHE_LINE_WORDS*ICACHE_DATA_WIDTH-1:0]
+                                              victim_write_line;
+
+    logic                                     victim_invalidate_en;
+    logic [ICACHE_VICTIM_ENTRY_BITS-1:0]      victim_invalidate_entry;
 
     logic                                     perf_req_accept;
     logic                                     perf_lookup_event;
@@ -104,6 +128,39 @@ module scr1_icache #(
         .line_commit_tag_i           (cache_line_commit_tag)
     );
 
+    // Four-entry (by default) fully-associative victim cache. It stores whole
+    // lines displaced from the direct-mapped L1 I-cache.
+    victim_cache #(
+        .ICACHE_DATA_WIDTH        (ICACHE_DATA_WIDTH),
+        .ICACHE_LINE_WORDS        (ICACHE_LINE_WORDS),
+        .ICACHE_WORD_OFFSET_BITS  (ICACHE_WORD_OFFSET_BITS),
+        .ICACHE_INDEX_BITS        (ICACHE_INDEX_BITS),
+        .ICACHE_TAG_BITS          (ICACHE_TAG_BITS),
+        .VICTIM_LINES             (ICACHE_VICTIM_LINES),
+        .VICTIM_ENTRY_BITS        (ICACHE_VICTIM_ENTRY_BITS)
+    ) i_victim_cache (
+        .clk                         (clk),
+        .rst_n                       (rst_n),
+
+        .victim_lookup_en_i          (victim_lookup_en),
+        .victim_lookup_tag_i         (victim_lookup_tag),
+        .victim_lookup_index_i       (victim_lookup_index),
+        .victim_lookup_word_offset_i (victim_lookup_word_offset),
+        .victim_lookup_hit_o         (victim_lookup_hit),
+        .victim_lookup_entry_o       (victim_lookup_entry),
+        .victim_lookup_data_o        (victim_lookup_data),
+        .victim_lookup_line_o        (victim_lookup_line),
+
+        .victim_write_en_i           (victim_write_en),
+        .victim_write_entry_i        (victim_write_entry),
+        .victim_write_tag_i          (victim_write_tag),
+        .victim_write_index_i        (victim_write_index),
+        .victim_write_line_i         (victim_write_line),
+
+        .victim_invalidate_en_i      (victim_invalidate_en),
+        .victim_invalidate_entry_i   (victim_invalidate_entry)
+    );
+
     icache_controller #(
         .ICACHE_ADDR_WIDTH        (ICACHE_ADDR_WIDTH),
         .ICACHE_DATA_WIDTH        (ICACHE_DATA_WIDTH),
@@ -113,7 +170,9 @@ module scr1_icache #(
         .ICACHE_INDEX_BITS        (ICACHE_INDEX_BITS),
         .ICACHE_TAG_BITS          (ICACHE_TAG_BITS),
         .ICACHE_REFILL_CNT_WIDTH  (ICACHE_REFILL_CNT_WIDTH),
-        .ICACHE_BYTE_OFFSET_BITS  (ICACHE_BYTE_OFFSET_BITS)
+        .ICACHE_BYTE_OFFSET_BITS  (ICACHE_BYTE_OFFSET_BITS),
+        .VICTIM_LINES             (ICACHE_VICTIM_LINES),
+        .VICTIM_ENTRY_BITS        (ICACHE_VICTIM_ENTRY_BITS)
     ) i_icache_controller (
         .clk                         (clk),
         .rst_n                       (rst_n),
@@ -151,6 +210,25 @@ module scr1_icache #(
         .cache_line_commit_o         (cache_line_commit),
         .cache_line_commit_index_o   (cache_line_commit_index),
         .cache_line_commit_tag_o     (cache_line_commit_tag),
+
+        .victim_lookup_hit_o         (victim_lookup_hit),
+        .victim_lookup_entry_o       (victim_lookup_entry),
+        .victim_lookup_data_o        (victim_lookup_data),
+        .victim_lookup_line_o        (victim_lookup_line),
+
+        .victim_lookup_en_i          (victim_lookup_en),
+        .victim_lookup_tag_i         (victim_lookup_tag),
+        .victim_lookup_index_i       (victim_lookup_index),
+        .victim_lookup_word_offset_i (victim_lookup_word_offset),
+
+        .victim_write_en_i           (victim_write_en),
+        .victim_write_entry_i        (victim_write_entry),
+        .victim_write_tag_i          (victim_write_tag),
+        .victim_write_index_i        (victim_write_index),
+        .victim_write_line_i         (victim_write_line),
+
+        .victim_invalidate_en_i      (victim_invalidate_en),
+        .victim_invalidate_entry_i   (victim_invalidate_entry),
 
         .perf_req_accept_o           (perf_req_accept),
         .perf_lookup_event_o         (perf_lookup_event),
