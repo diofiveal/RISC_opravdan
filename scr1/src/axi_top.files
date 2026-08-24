@@ -5,10 +5,3 @@ top/scr1_tcm.sv
 top/scr1_timer.sv
 top/scr1_mem_axi.sv
 top/scr1_top_axi.sv
-
-top/icache.sv
-top/icache_controller.sv
-top/scr1_icache_top.sv
-top/dcache.sv
-top/dcache_controller.sv
-top/scr1_dcache_top.sv

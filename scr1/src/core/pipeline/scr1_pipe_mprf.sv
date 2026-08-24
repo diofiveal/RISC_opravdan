@@ -157,16 +157,26 @@ assign  mprf2exu_rs2_data_o = ( rs2_addr_vd ) ? mprf_int[exu2mprf_rs2_addr_i] : 
 
 `ifdef SCR1_EARLY_BRANCH
 // IDU reading with bypass (we use already existing signal wr_req_vd)
-assign mprf2idu_rs1_data_o = (idu_rs1_addr_vd) 
-                               ? ((wr_req_vd && (idu2mprf_rs1_addr_i == exu2mprf_rd_addr_i)) 
-                                   ? exu2mprf_rd_data_i 
-                                   : mprf_int[idu2mprf_rs1_addr_i]) 
-                               : '0;
-assign mprf2idu_rs2_data_o = (idu_rs2_addr_vd) 
-                               ? ((wr_req_vd && (idu2mprf_rs2_addr_i == exu2mprf_rd_addr_i)) 
-                                   ? exu2mprf_rd_data_i 
-                                   : mprf_int[idu2mprf_rs2_addr_i]) 
-                               : '0;
+// assign mprf2idu_rs1_data_o = (idu_rs1_addr_vd) 
+//                                ? ((wr_req_vd && (idu2mprf_rs1_addr_i == exu2mprf_rd_addr_i)) 
+//                                    ? exu2mprf_rd_data_i 
+//                                    : mprf_int[idu2mprf_rs1_addr_i]) 
+//                                : '0;
+// assign mprf2idu_rs2_data_o = (idu_rs2_addr_vd) 
+//                                ? ((wr_req_vd && (idu2mprf_rs2_addr_i == exu2mprf_rd_addr_i)) 
+//                                    ? exu2mprf_rd_data_i 
+//                                    : mprf_int[idu2mprf_rs2_addr_i]) 
+//                                : '0;
+
+assign mprf2idu_rs1_data_o =
+    idu_rs1_addr_vd
+        ? mprf_int[idu2mprf_rs1_addr_i]
+        : '0;
+
+assign mprf2idu_rs2_data_o =
+    idu_rs2_addr_vd
+        ? mprf_int[idu2mprf_rs2_addr_i]
+        : '0;
 `endif
 
 

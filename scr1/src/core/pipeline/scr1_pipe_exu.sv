@@ -342,6 +342,13 @@ logic                               wb_commit;
 logic                               wb_retire;
 logic                               wb_raw_hazard;
 logic                               exu_order_block;
+
+// IRQ drain request. In MEM-stage configuration an interrupt must not depend
+// combinationally on exu_rdy/IALU/MDU completion. Once an eligible IRQ is
+// present, stop accepting younger instructions, let the current pipeline
+// contents drain, and take the IRQ only when EXU and the following buffers
+// are empty.
+logic                               irq_drain_req;
 `endif // SCR1_MEM_STAGE_EN
 
 //------------------------------------------------------------------------------
@@ -395,7 +402,16 @@ always_ff @(posedge clk, negedge rst_n) begin
     end
 end
 
+`ifdef SCR1_MEM_STAGE_EN
+// Next valid is based on the real IDU->EXU handshake. During IRQ drain IDU
+// may keep req asserted while EXU deasserts ready; in that case the stale EXU
+// queue must not become valid again without an accepted instruction.
+assign exu_queue_vd_next = ~exu_queue_barrier
+                         & exu_queue_en
+                         & ~exu2ifu_pc_new_req_o;
+`else
 assign exu_queue_vd_next = ~exu_queue_barrier & idu2exu_req_i & ~exu2ifu_pc_new_req_o;
+`endif
 assign exu_queue_vd      = exu_queue_vd_ff;
 
 // EXU queue register
@@ -1270,7 +1286,8 @@ assign exu2pipe_init_pc_o       = init_pc;
 assign exu2idu_rdy_o =
        exu_stage_rdy
      & ~exu_queue_barrier
-     & ~mem2exu_exc_i;
+     & ~mem2exu_exc_i
+     & ~irq_drain_req;
 `else
 assign exu2idu_rdy_o =
        exu_rdy
@@ -1521,10 +1538,33 @@ assign exu2csr_exc_code_o = exc_code;
 assign exu2csr_trap_val_o = exc_trap_val;
 
 // Interrupts signals
-assign exu2csr_take_irq_o = csr2exu_irq_i & ~exu2pipe_exu_busy_o
 `ifdef SCR1_MEM_STAGE_EN
-     & ~exu_order_block
-`endif
+
+// Qualify the interrupt request independently of EXU ready. This is the timing
+// cut: irq_drain_req has no dependency on exu_rdy, ialu_rdy or the MDU/DIV
+// datapath.
+assign irq_drain_req = csr2exu_irq_i
+`ifdef SCR1_DBG_EN
+                     & ~hdu2exu_irq_dsbl_i
+                     & ~hdu2exu_dbg_halted_i
+`endif // SCR1_DBG_EN
+`ifdef SCR1_CLKCTRL_EN
+                     & clk_pipe_en
+`endif // SCR1_CLKCTRL_EN
+                     ;
+
+// Precise interrupt by pipeline drain. irq_drain_req blocks younger IDU
+// instructions. The current EXU instruction completes normally; IRQ is taken
+// only after the registered EXU valid bit is clear and MEM/WB contain no older
+// work. This removes the old path:
+// MDU/DIV -> ialu_rdy -> exu_rdy -> exu_busy -> take_irq -> IFU.
+assign exu2csr_take_irq_o = irq_drain_req
+                          & ~exu_queue_vd
+                          & ~exu_order_block;
+
+`else // !SCR1_MEM_STAGE_EN
+
+assign exu2csr_take_irq_o = csr2exu_irq_i & ~exu2pipe_exu_busy_o
 `ifdef SCR1_DBG_EN
                           & ~hdu2exu_irq_dsbl_i
                           & ~hdu2exu_dbg_halted_i
@@ -1533,6 +1573,8 @@ assign exu2csr_take_irq_o = csr2exu_irq_i & ~exu2pipe_exu_busy_o
                           & clk_pipe_en
 `endif // SCR1_CLKCTRL_EN
                           ;
+
+`endif // SCR1_MEM_STAGE_EN
 
 // MRET signals
 // MRET instruction flag

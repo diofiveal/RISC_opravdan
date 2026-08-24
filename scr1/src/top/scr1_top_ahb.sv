@@ -123,14 +123,6 @@ logic [`SCR1_IMEM_AWIDTH-1:0]                       ahb_imem_addr;
 logic [`SCR1_IMEM_DWIDTH-1:0]                       ahb_imem_rdata;
 type_scr1_mem_resp_e                                ahb_imem_resp;
 
-//Icache interface to IMEM router
-logic                                               icache_imem_req_ack;
-logic                                               icache_imem_req;
-type_scr1_mem_cmd_e                                 icache_imem_cmd;
-logic [`SCR1_IMEM_AWIDTH-1:0]                       icache_imem_addr;
-logic [`SCR1_IMEM_DWIDTH-1:0]                       icache_imem_rdata;
-type_scr1_mem_resp_e                                icache_imem_resp;
-
 // Data memory interface from router to AHB bridge
 logic                                               ahb_dmem_req_ack;
 logic                                               ahb_dmem_req;
@@ -140,16 +132,6 @@ logic [`SCR1_DMEM_AWIDTH-1:0]                       ahb_dmem_addr;
 logic [`SCR1_DMEM_DWIDTH-1:0]                       ahb_dmem_wdata;
 logic [`SCR1_DMEM_DWIDTH-1:0]                       ahb_dmem_rdata;
 type_scr1_mem_resp_e                                ahb_dmem_resp;
-
-// Dcache interface to DMEM router
-logic                         dcache_dmem_req_ack;
-logic                         dcache_dmem_req;
-type_scr1_mem_cmd_e           dcache_dmem_cmd;
-type_scr1_mem_width_e         dcache_dmem_width;
-logic [`SCR1_DMEM_AWIDTH-1:0] dcache_dmem_addr;
-logic [`SCR1_DMEM_DWIDTH-1:0] dcache_dmem_wdata;
-logic [`SCR1_DMEM_DWIDTH-1:0] dcache_dmem_rdata;
-type_scr1_mem_resp_e          dcache_dmem_resp;
 
 `ifdef SCR1_TCM_EN
 // Instruction memory interface from router to TCM
@@ -374,19 +356,13 @@ scr1_imem_router #(
     .imem_addr      (core_imem_addr   ),
     .imem_rdata     (core_imem_rdata  ),
     .imem_resp      (core_imem_resp   ),
-    // Interface to icache
-    .port0_req_ack  (icache_imem_req_ack),
-    .port0_req      (icache_imem_req),
-    .port0_cmd      (icache_imem_cmd),
-    .port0_addr     (icache_imem_addr),
-    .port0_rdata    (icache_imem_rdata),
-    .port0_resp     (icache_imem_resp),
-    //.port0_req_ack  (ahb_imem_req_ack ),
-    //.port0_req      (ahb_imem_req     ),
-    //.port0_cmd      (ahb_imem_cmd     ),
-    //.port0_addr     (ahb_imem_addr    ),
-    //.port0_rdata    (ahb_imem_rdata   ),
-    //.port0_resp     (ahb_imem_resp    ),
+    // Interface to AHB bridge
+    .port0_req_ack  (ahb_imem_req_ack ),
+    .port0_req      (ahb_imem_req     ),
+    .port0_cmd      (ahb_imem_cmd     ),
+    .port0_addr     (ahb_imem_addr    ),
+    .port0_rdata    (ahb_imem_rdata   ),
+    .port0_resp     (ahb_imem_resp    ),
  `ifdef SCR1_TCM_EN
     // Interface to TCM
     .port1_req_ack  (tcm_imem_req_ack ),
@@ -397,26 +373,7 @@ scr1_imem_router #(
     .port1_resp     (tcm_imem_resp    )
  `endif // SCR1_TCM_EN
 );
-scr1_icache i_icache (
-    .clk                 (clk),
-    .rst_n               (core_rst_n_local),
 
-    // IMEM router interface
-    .router_req_ack_o    (icache_imem_req_ack),
-    .router_req_i        (icache_imem_req),
-    .router_cmd_i        (icache_imem_cmd),
-    .router_addr_i       (icache_imem_addr),
-    .router_rdata_o      (icache_imem_rdata),
-    .router_resp_o       (icache_imem_resp),
-
-    //AHB interface
-    .memory_req_ack_i    (ahb_imem_req_ack),
-    .memory_req_o        (ahb_imem_req),
-    .memory_cmd_o        (ahb_imem_cmd),
-    .memory_addr_o       (ahb_imem_addr),
-    .memory_rdata_i      (ahb_imem_rdata),
-    .memory_resp_i       (ahb_imem_resp)
-);
 `else // SCR1_IMEM_ROUTER_EN
 
 assign ahb_imem_req         = core_imem_req;
@@ -486,46 +443,14 @@ scr1_dmem_router #(
     .port2_rdata    (timer_dmem_rdata    ),
     .port2_resp     (timer_dmem_resp     ),
     // Interface to AHB bridge
-    .port0_req_ack  (dcache_dmem_req_ack),
-    .port0_req      (dcache_dmem_req),
-    .port0_cmd      (dcache_dmem_cmd),
-    .port0_width    (dcache_dmem_width),
-    .port0_addr     (dcache_dmem_addr),
-    .port0_wdata    (dcache_dmem_wdata),
-    .port0_rdata    (dcache_dmem_rdata),
-    .port0_resp     (dcache_dmem_resp)
-    //.port0_req_ack  (ahb_dmem_req_ack    ),
-    //.port0_req      (ahb_dmem_req        ),
-    //.port0_cmd      (ahb_dmem_cmd        ),
-    //.port0_width    (ahb_dmem_width      ),
-    //.port0_addr     (ahb_dmem_addr       ),
-    //.port0_wdata    (ahb_dmem_wdata      ),
-    //.port0_rdata    (ahb_dmem_rdata      ),
-    //.port0_resp     (ahb_dmem_resp       )
-);
-scr1_dcache i_dcache (
-    .clk                (clk),
-    .rst_n              (core_rst_n_local),
-
-    // DMEM router interface
-    .router_req_i       (dcache_dmem_req),
-    .router_cmd_i       (dcache_dmem_cmd),
-    .router_width_i     (dcache_dmem_width),
-    .router_addr_i      (dcache_dmem_addr),
-    .router_wdata_i     (dcache_dmem_wdata),
-    .router_req_ack_o   (dcache_dmem_req_ack),
-    .router_rdata_o     (dcache_dmem_rdata),
-    .router_resp_o      (dcache_dmem_resp),
-
-    // AHB bridge interface
-    .memory_req_o       (ahb_dmem_req),
-    .memory_cmd_o       (ahb_dmem_cmd),
-    .memory_width_o     (ahb_dmem_width),
-    .memory_addr_o      (ahb_dmem_addr),
-    .memory_wdata_o     (ahb_dmem_wdata),
-    .memory_req_ack_i   (ahb_dmem_req_ack),
-    .memory_rdata_i     (ahb_dmem_rdata),
-    .memory_resp_i      (ahb_dmem_resp)
+    .port0_req_ack  (ahb_dmem_req_ack    ),
+    .port0_req      (ahb_dmem_req        ),
+    .port0_cmd      (ahb_dmem_cmd        ),
+    .port0_width    (ahb_dmem_width      ),
+    .port0_addr     (ahb_dmem_addr       ),
+    .port0_wdata    (ahb_dmem_wdata      ),
+    .port0_rdata    (ahb_dmem_rdata      ),
+    .port0_resp     (ahb_dmem_resp       )
 );
 
 
