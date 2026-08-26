@@ -255,6 +255,29 @@ logic                                               axi_reinit;
 logic                                               axi_imem_idle;
 logic                                               axi_dmem_idle;
 
+`ifdef SCR1_IMEM_REQ_BUF
+
+// Buffered interface from core to IMEM router
+logic                           router_imem_req_ack;
+logic                           router_imem_req;
+type_scr1_mem_cmd_e             router_imem_cmd;
+logic [`SCR1_IMEM_AWIDTH-1:0]   router_imem_addr;
+
+// 2-entry IMEM request FIFO
+logic [`SCR1_IMEM_AWIDTH-1:0]   imem_req_addr_ff [0:1];
+type_scr1_mem_cmd_e             imem_req_cmd_ff  [0:1];
+
+logic                           imem_req_wr_ptr_ff;
+logic                           imem_req_rd_ptr_ff;
+logic [1:0]                     imem_req_cnt_ff;
+
+logic                           imem_req_push;
+logic                           imem_req_pop;
+logic                           imem_req_fifo_empty;
+logic                           imem_req_fifo_full;
+
+`endif // SCR1_IMEM_REQ_BUF
+
 //-------------------------------------------------------------------------------
 // Reset logic
 //-------------------------------------------------------------------------------
@@ -435,10 +458,73 @@ scr1_timer i_timer (
 //-------------------------------------------------------------------------------
 // Instruction memory router
 //-------------------------------------------------------------------------------
+`ifdef SCR1_IMEM_REQ_BUF
+
+assign imem_req_fifo_empty = (imem_req_cnt_ff == 2'd0);
+assign imem_req_fifo_full  = (imem_req_cnt_ff == 2'd2);
+
+// Core считает запрос принятым, как только он помещён в FIFO.
+// Здесь больше нет зависимости от ACK кэша.
+assign core_imem_req_ack = ~imem_req_fifo_full;
+
+assign imem_req_push =
+       core_imem_req
+     & core_imem_req_ack;
+
+// Router видит только зарегистрированный head FIFO
+assign router_imem_req  = ~imem_req_fifo_empty;
+assign router_imem_cmd  = imem_req_cmd_ff [imem_req_rd_ptr_ff];
+assign router_imem_addr = imem_req_addr_ff[imem_req_rd_ptr_ff];
+
+assign imem_req_pop =
+       router_imem_req
+     & router_imem_req_ack;
+
+
+// Write pointer + request data
+always_ff @(posedge clk, negedge core_rst_n_local) begin
+    if (~core_rst_n_local) begin
+        imem_req_wr_ptr_ff <= 1'b0;
+    end else if (imem_req_push) begin
+        imem_req_addr_ff[imem_req_wr_ptr_ff] <= core_imem_addr;
+        imem_req_cmd_ff [imem_req_wr_ptr_ff] <= core_imem_cmd;
+        imem_req_wr_ptr_ff <= ~imem_req_wr_ptr_ff;
+    end
+end
+
+
+// Read pointer
+always_ff @(posedge clk, negedge core_rst_n_local) begin
+    if (~core_rst_n_local) begin
+        imem_req_rd_ptr_ff <= 1'b0;
+    end else if (imem_req_pop) begin
+        imem_req_rd_ptr_ff <= ~imem_req_rd_ptr_ff;
+    end
+end
+
+
+// Number of buffered requests
+always_ff @(posedge clk, negedge core_rst_n_local) begin
+    if (~core_rst_n_local) begin
+        imem_req_cnt_ff <= 2'd0;
+    end else begin
+        case ({imem_req_push, imem_req_pop})
+            2'b10:   imem_req_cnt_ff <= imem_req_cnt_ff + 1'b1;
+            2'b01:   imem_req_cnt_ff <= imem_req_cnt_ff - 1'b1;
+            default: imem_req_cnt_ff <= imem_req_cnt_ff;
+        endcase
+    end
+end
+
+`endif // SCR1_IMEM_REQ_BUF
+
 scr1_imem_router #(
     .SCR1_ADDR_MASK     (SCR1_TCM_ADDR_MASK),
     .SCR1_ADDR_PATTERN  (SCR1_TCM_ADDR_PATTERN)
-) i_imem_router (
+)
+
+
+i_imem_router (
     .rst_n          (core_rst_n_local ),
     .clk            (clk              ),
 
