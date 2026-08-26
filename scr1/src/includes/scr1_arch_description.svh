@@ -85,7 +85,9 @@
   `define SCR1_TCM_EN
   `define SCR1_EARLY_BRANCH
   `define SCR1_MEM_STAGE_EN
-  `define SCR1_IMEM_REQ_BUF
+  // `define SCR1_IMEM_REQ_BUF
+  // `define SCR1_IMEM_ACK_REG
+  `define SCR1_IMEM_SKID_BUF
 `elsif  SCR1_CFG_RV32IC_BASE
   `define SCR1_RVI_EXT
   `define SCR1_RVC_EXT

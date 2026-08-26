@@ -613,7 +613,13 @@ assign imem_resp_received       = imem_resp_ok | imem_resp_er;
 assign imem_resp_vd             = imem_resp_received & ~imem_resp_discard_req;
 assign imem_resp_er_discard_pnd = imem_resp_er & ~imem_resp_discard_req;
 
-assign imem_handshake_done = ifu2imem_req_o & imem2ifu_req_ack_i;
+`ifdef SCR1_IMEM_ACK_REG
+assign imem_handshake_done = imem2ifu_req_ack_i;
+`else
+assign imem_handshake_done =
+       ifu2imem_req_o
+     & imem2ifu_req_ack_i;
+`endif
 
 // IMEM address register
 //------------------------------------------------------------------------------
@@ -633,25 +639,82 @@ always_ff @(posedge clk, negedge rst_n) begin
 end
 
 `ifdef SCR1_EARLY_BRANCH
-    `ifndef SCR1_NEW_PC_REG
-    assign imem_addr_next = pc_new_req_internal ? pc_new_addr_internal[`SCR1_XLEN-1:2] + imem_handshake_done
-                          : &imem_addr_ff[5:2]   ? imem_addr_ff                                     + imem_handshake_done
-                                                 : {imem_addr_ff[`SCR1_XLEN-1:6], imem_addr_ff[5:2] + imem_handshake_done};
-    `else // SCR1_NEW_PC_REG
-    assign imem_addr_next = pc_new_req_internal ? pc_new_addr_internal[`SCR1_XLEN-1:2]
-                          : &imem_addr_ff[5:2]   ? imem_addr_ff                                     + imem_handshake_done
-                                                 : {imem_addr_ff[`SCR1_XLEN-1:6], imem_addr_ff[5:2] + imem_handshake_done};
-    `endif
+
+    `ifdef SCR1_IMEM_ACK_REG
+
+    assign imem_addr_next =
+        pc_new_req_internal
+            ? pc_new_addr_internal[`SCR1_XLEN-1:2]
+            : &imem_addr_ff[5:2]
+                ? imem_addr_ff + imem_handshake_done
+                : {imem_addr_ff[`SCR1_XLEN-1:6],
+                   imem_addr_ff[5:2] + imem_handshake_done};
+
+    `else // ~SCR1_IMEM_ACK_REG
+
+        `ifndef SCR1_NEW_PC_REG
+
+        assign imem_addr_next =
+            pc_new_req_internal
+                ? pc_new_addr_internal[`SCR1_XLEN-1:2] + imem_handshake_done
+                : &imem_addr_ff[5:2]
+                    ? imem_addr_ff + imem_handshake_done
+                    : {imem_addr_ff[`SCR1_XLEN-1:6],
+                       imem_addr_ff[5:2] + imem_handshake_done};
+
+        `else // SCR1_NEW_PC_REG
+
+        assign imem_addr_next =
+            pc_new_req_internal
+                ? pc_new_addr_internal[`SCR1_XLEN-1:2]
+                : &imem_addr_ff[5:2]
+                    ? imem_addr_ff + imem_handshake_done
+                    : {imem_addr_ff[`SCR1_XLEN-1:6],
+                       imem_addr_ff[5:2] + imem_handshake_done};
+
+        `endif // SCR1_NEW_PC_REG
+
+    `endif // SCR1_IMEM_ACK_REG
+
+
 `else // ~SCR1_EARLY_BRANCH
-    `ifndef SCR1_NEW_PC_REG
-    assign imem_addr_next = exu2ifu_pc_new_req_i ? exu2ifu_pc_new_i[`SCR1_XLEN-1:2] + imem_handshake_done
-                          : &imem_addr_ff[5:2]   ? imem_addr_ff                                     + imem_handshake_done
-                                                 : {imem_addr_ff[`SCR1_XLEN-1:6], imem_addr_ff[5:2] + imem_handshake_done};
-    `else // SCR1_NEW_PC_REG
-    assign imem_addr_next = exu2ifu_pc_new_req_i ? exu2ifu_pc_new_i[`SCR1_XLEN-1:2]
-                          : &imem_addr_ff[5:2]   ? imem_addr_ff                                     + imem_handshake_done
-                                                 : {imem_addr_ff[`SCR1_XLEN-1:6], imem_addr_ff[5:2] + imem_handshake_done};
-    `endif
+
+    `ifdef SCR1_IMEM_ACK_REG
+
+    assign imem_addr_next =
+        exu2ifu_pc_new_req_i
+            ? exu2ifu_pc_new_i[`SCR1_XLEN-1:2]
+            : &imem_addr_ff[5:2]
+                ? imem_addr_ff + imem_handshake_done
+                : {imem_addr_ff[`SCR1_XLEN-1:6],
+                   imem_addr_ff[5:2] + imem_handshake_done};
+
+    `else // ~SCR1_IMEM_ACK_REG
+
+        `ifndef SCR1_NEW_PC_REG
+
+        assign imem_addr_next =
+            exu2ifu_pc_new_req_i
+                ? exu2ifu_pc_new_i[`SCR1_XLEN-1:2] + imem_handshake_done
+                : &imem_addr_ff[5:2]
+                    ? imem_addr_ff + imem_handshake_done
+                    : {imem_addr_ff[`SCR1_XLEN-1:6],
+                       imem_addr_ff[5:2] + imem_handshake_done};
+
+        `else // SCR1_NEW_PC_REG
+
+        assign imem_addr_next =
+            exu2ifu_pc_new_req_i
+                ? exu2ifu_pc_new_i[`SCR1_XLEN-1:2]
+                : &imem_addr_ff[5:2]
+                    ? imem_addr_ff + imem_handshake_done
+                    : {imem_addr_ff[`SCR1_XLEN-1:6],
+                       imem_addr_ff[5:2] + imem_handshake_done};
+
+        `endif // SCR1_NEW_PC_REG
+
+    `endif // SCR1_IMEM_ACK_REG
+
 `endif // SCR1_EARLY_BRANCH
 
 // Pending IMEM transactions counter
@@ -686,32 +749,69 @@ assign imem_pnd_txns_q_full   = &imem_pnd_txns_cnt;
 // that subsequent IMEM instructions would be valid.
 
 `ifdef SCR1_EARLY_BRANCH
+
 assign imem_resp_discard_cnt_upd = pc_new_req_internal | imem_resp_er
                                  | (imem_resp_ok & imem_resp_discard_req);
 
-`ifndef SCR1_NEW_PC_REG
-assign imem_resp_discard_cnt_next = pc_new_req_internal     ? imem_pnd_txns_cnt_next - imem_handshake_done
-                                  : imem_resp_er_discard_pnd ? imem_pnd_txns_cnt_next
-                                                             : imem_resp_discard_cnt - 1'b1;
-`else // SCR1_NEW_PC_REG
+    `ifdef SCR1_IMEM_ACK_REG
+
 assign imem_resp_discard_cnt_next = pc_new_req_internal | imem_resp_er_discard_pnd
                                   ? imem_pnd_txns_cnt_next
                                   : imem_resp_discard_cnt - 1'b1;
-`endif
-`else
+
+    `else // ~SCR1_IMEM_ACK_REG
+
+        `ifndef SCR1_NEW_PC_REG
+
+assign imem_resp_discard_cnt_next = pc_new_req_internal
+                                  ? imem_pnd_txns_cnt_next - imem_handshake_done
+                                  : imem_resp_er_discard_pnd
+                                  ? imem_pnd_txns_cnt_next
+                                  : imem_resp_discard_cnt - 1'b1;
+
+        `else // SCR1_NEW_PC_REG
+
+assign imem_resp_discard_cnt_next = pc_new_req_internal | imem_resp_er_discard_pnd
+                                  ? imem_pnd_txns_cnt_next
+                                  : imem_resp_discard_cnt - 1'b1;
+
+        `endif // SCR1_NEW_PC_REG
+
+    `endif // SCR1_IMEM_ACK_REG
+
+
+`else // ~SCR1_EARLY_BRANCH
+
 assign imem_resp_discard_cnt_upd = exu2ifu_pc_new_req_i | imem_resp_er
                                  | (imem_resp_ok & imem_resp_discard_req);
 
-`ifndef SCR1_NEW_PC_REG
-assign imem_resp_discard_cnt_next = exu2ifu_pc_new_req_i     ? imem_pnd_txns_cnt_next - imem_handshake_done
-                                  : imem_resp_er_discard_pnd ? imem_pnd_txns_cnt_next
-                                                             : imem_resp_discard_cnt - 1'b1;
-`else // SCR1_NEW_PC_REG
+    `ifdef SCR1_IMEM_ACK_REG
+
 assign imem_resp_discard_cnt_next = exu2ifu_pc_new_req_i | imem_resp_er_discard_pnd
                                   ? imem_pnd_txns_cnt_next
                                   : imem_resp_discard_cnt - 1'b1;
-`endif
-`endif
+
+    `else // ~SCR1_IMEM_ACK_REG
+
+        `ifndef SCR1_NEW_PC_REG
+
+assign imem_resp_discard_cnt_next = exu2ifu_pc_new_req_i
+                                  ? imem_pnd_txns_cnt_next - imem_handshake_done
+                                  : imem_resp_er_discard_pnd
+                                  ? imem_pnd_txns_cnt_next
+                                  : imem_resp_discard_cnt - 1'b1;
+
+        `else // SCR1_NEW_PC_REG
+
+assign imem_resp_discard_cnt_next = exu2ifu_pc_new_req_i | imem_resp_er_discard_pnd
+                                  ? imem_pnd_txns_cnt_next
+                                  : imem_resp_discard_cnt - 1'b1;
+
+        `endif // SCR1_NEW_PC_REG
+
+    `endif // SCR1_IMEM_ACK_REG
+
+`endif // SCR1_EARLY_BRANCH
 assign imem_vd_pnd_txns_cnt  = imem_pnd_txns_cnt - imem_resp_discard_cnt;
 assign imem_resp_discard_req = |imem_resp_discard_cnt;
 
