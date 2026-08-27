@@ -13,7 +13,15 @@
  `define SCR1_IMEM_ROUTER_EN
 `endif // SCR1_TCM_EN
 
-module scr1_top_axi (
+module scr1_top_axi #(
+    parameter int unsigned SCR1_ICACHE_LINE_BYTES = 8,
+    parameter int unsigned SCR1_DCACHE_LINE_BYTES = 8,
+    parameter bit SCR1_ICACHE_AXI_BURST_ENABLE = 1'b1,
+    parameter bit SCR1_DCACHE_AXI_BURST_ENABLE = 1'b1,
+    parameter int unsigned SCR1_AXI_MAX_READ_BURST_BEATS = 8,
+    // 1: no-write-allocate on cacheable STORE miss; 0: legacy write-allocate.
+    parameter bit SCR1_DCACHE_NO_WRITE_ALLOCATE = 1'b1
+) (
     // Control
     input   logic                                   pwrup_rst_n,            // Power-Up Reset
     input   logic                                   rst_n,                  // Regular Reset signal
@@ -190,7 +198,11 @@ type_scr1_mem_cmd_e                                 axi_imem_cmd;
 logic [`SCR1_IMEM_AWIDTH-1:0]                       axi_imem_addr;
 logic [`SCR1_IMEM_DWIDTH-1:0]                       axi_imem_rdata;
 type_scr1_mem_resp_e                                axi_imem_resp;
-
+logic [7:0]                                         axi_imem_burst_len;
+logic                                               axi_imem_rvalid;
+logic                                               axi_imem_rlast;
+logic [`SCR1_IMEM_DWIDTH-1:0]                       axi_imem_beat_rdata;
+type_scr1_mem_resp_e                                axi_imem_beat_resp;
 // Instruction cache interface to IMEM router
 logic                                               icache_imem_req_ack;
 logic                                               icache_imem_req;
@@ -208,6 +220,11 @@ logic [`SCR1_DMEM_AWIDTH-1:0]                       axi_dmem_addr;
 logic [`SCR1_DMEM_DWIDTH-1:0]                       axi_dmem_wdata;
 logic [`SCR1_DMEM_DWIDTH-1:0]                       axi_dmem_rdata;
 type_scr1_mem_resp_e                                axi_dmem_resp;
+logic [7:0]                                         axi_dmem_burst_len;
+logic                                               axi_dmem_rvalid;
+logic                                               axi_dmem_rlast;
+logic [`SCR1_DMEM_DWIDTH-1:0]                       axi_dmem_beat_rdata;
+type_scr1_mem_resp_e                                axi_dmem_beat_resp;
 
 // Dcache interface to DMEM router
 logic                                               dcache_dmem_req_ack;
@@ -218,6 +235,10 @@ logic [`SCR1_DMEM_AWIDTH-1:0]                       dcache_dmem_addr;
 logic [`SCR1_DMEM_DWIDTH-1:0]                       dcache_dmem_wdata;
 logic [`SCR1_DMEM_DWIDTH-1:0]                       dcache_dmem_rdata;
 type_scr1_mem_resp_e                                dcache_dmem_resp;
+
+// Four cacheable stores can retire ahead of the external memory response.
+// Keep the depth explicit at the SoC top so FPGA builds have one clear knob.
+localparam int unsigned SCR1_DCACHE_WRITE_BUFFER_DEPTH = 4;
 `ifdef SCR1_TCM_EN
 // Instruction memory interface from router to TCM
 logic                                               tcm_imem_req_ack;
@@ -436,8 +457,8 @@ scr1_timer i_timer (
 // Instruction memory router
 //-------------------------------------------------------------------------------
 scr1_imem_router #(
-    .SCR1_ADDR_MASK     (SCR1_TCM_ADDR_MASK),
-    .SCR1_ADDR_PATTERN  (SCR1_TCM_ADDR_PATTERN)
+    .SCR1_ADDR_MASK             (SCR1_TCM_ADDR_MASK),
+    .SCR1_ADDR_PATTERN          (SCR1_TCM_ADDR_PATTERN)
 ) i_imem_router (
     .rst_n          (core_rst_n_local ),
     .clk            (clk              ),
@@ -472,7 +493,11 @@ scr1_imem_router #(
     .port1_rdata    (tcm_imem_rdata   ),
     .port1_resp     (tcm_imem_resp    )
 );
-scr1_icache i_icache (
+scr1_icache #(
+    .ICACHE_LINE_BYTES            (SCR1_ICACHE_LINE_BYTES),
+    .ICACHE_AXI_BURST_ENABLE      (SCR1_ICACHE_AXI_BURST_ENABLE),
+    .ICACHE_MAX_READ_BURST_BEATS  (SCR1_AXI_MAX_READ_BURST_BEATS)
+) i_icache (
     .clk                 (clk),
     .rst_n               (core_rst_n_local),
 
@@ -489,8 +514,11 @@ scr1_icache i_icache (
     .memory_req_o        (axi_imem_req),
     .memory_cmd_o        (axi_imem_cmd),
     .memory_addr_o       (axi_imem_addr),
-    .memory_rdata_i      (axi_imem_rdata),
-    .memory_resp_i       (axi_imem_resp)
+    .memory_burst_len_o  (axi_imem_burst_len),
+    .memory_rvalid_i     (axi_imem_rvalid),
+    .memory_rlast_i      (axi_imem_rlast),
+    .memory_rdata_i      (axi_imem_beat_rdata),
+    .memory_resp_i       (axi_imem_beat_resp)
 );
 
 `else // SCR1_IMEM_ROUTER_EN
@@ -498,6 +526,7 @@ scr1_icache i_icache (
 assign axi_imem_req         = core_imem_req;
 assign axi_imem_cmd         = core_imem_cmd;
 assign axi_imem_addr        = core_imem_addr;
+assign axi_imem_burst_len   = 8'd0;
 assign core_imem_req_ack    = axi_imem_req_ack;
 assign core_imem_resp       = axi_imem_resp;
 assign core_imem_rdata      = axi_imem_rdata;
@@ -585,7 +614,13 @@ scr1_dmem_router #(
     .port0_rdata    (dcache_dmem_rdata),
     .port0_resp     (dcache_dmem_resp)
 );
-scr1_dcache i_dcache (
+scr1_dcache #(
+    .DCACHE_LINE_BYTES         (SCR1_DCACHE_LINE_BYTES),
+    .DCACHE_WRITE_BUFFER_DEPTH (SCR1_DCACHE_WRITE_BUFFER_DEPTH),
+    .DCACHE_NO_WRITE_ALLOCATE  (SCR1_DCACHE_NO_WRITE_ALLOCATE),
+    .DCACHE_AXI_BURST_ENABLE   (SCR1_DCACHE_AXI_BURST_ENABLE),
+    .DCACHE_MAX_READ_BURST_BEATS (SCR1_AXI_MAX_READ_BURST_BEATS)
+) i_dcache (
     .clk                (clk),
     .rst_n              (core_rst_n_local),
 
@@ -605,9 +640,12 @@ scr1_dcache i_dcache (
     .memory_width_o     (axi_dmem_width),
     .memory_addr_o      (axi_dmem_addr),
     .memory_wdata_o     (axi_dmem_wdata),
+    .memory_burst_len_o (axi_dmem_burst_len),
     .memory_req_ack_i   (axi_dmem_req_ack),
-    .memory_rdata_i     (axi_dmem_rdata),
-    .memory_resp_i      (axi_dmem_resp)
+    .memory_rvalid_i    (axi_dmem_rvalid),
+    .memory_rlast_i     (axi_dmem_rlast),
+    .memory_rdata_i     (axi_dmem_beat_rdata),
+    .memory_resp_i      (axi_dmem_beat_resp)
 );
 
 
@@ -621,10 +659,12 @@ scr1_mem_axi #(
     .SCR1_AXI_REQ_BP    (0),
 `endif // SCR1_IMEM_AXI_REQ_BP
 `ifdef SCR1_IMEM_AXI_RESP_BP
-    .SCR1_AXI_RESP_BP   (1)
+    .SCR1_AXI_RESP_BP   (1),
 `else // SCR1_IMEM_AXI_RESP_BP
-    .SCR1_AXI_RESP_BP   (0)
+    .SCR1_AXI_RESP_BP   (0),
 `endif // SCR1_IMEM_AXI_RESP_BP
+    .SCR1_AXI_BURST_ENABLE (SCR1_ICACHE_AXI_BURST_ENABLE),
+    .SCR1_AXI_MAX_READ_BURST_BEATS (SCR1_AXI_MAX_READ_BURST_BEATS)
 ) i_imem_axi (
     .clk            (clk                    ),
     .rst_n          (axi_rst_n              ),
@@ -638,8 +678,13 @@ scr1_mem_axi #(
     .core_width     (SCR1_MEM_WIDTH_WORD    ),
     .core_addr      (axi_imem_addr          ),
     .core_wdata     ('0                     ),
+    .core_burst_len (axi_imem_burst_len     ),
     .core_rdata     (axi_imem_rdata         ),
     .core_resp      (axi_imem_resp          ),
+    .core_rvalid    (axi_imem_rvalid        ),
+    .core_rlast     (axi_imem_rlast         ),
+    .core_beat_rdata(axi_imem_beat_rdata    ),
+    .core_beat_resp (axi_imem_beat_resp     ),
 
     // AXI I/O
     .awid           (io_axi_imem_awid       ),
@@ -687,8 +732,6 @@ scr1_mem_axi #(
     .rvalid         (io_axi_imem_rvalid     ),
     .rready         (io_axi_imem_rready     )
 );
-
-
 //-------------------------------------------------------------------------------
 // Data memory AXI bridge
 //-------------------------------------------------------------------------------
@@ -699,10 +742,12 @@ scr1_mem_axi #(
     .SCR1_AXI_REQ_BP    (0),
 `endif // SCR1_DMEM_AXI_REQ_BP
 `ifdef SCR1_DMEM_AXI_RESP_BP
-    .SCR1_AXI_RESP_BP   (1)
+    .SCR1_AXI_RESP_BP   (1),
 `else // SCR1_DMEM_AXI_RESP_BP
-    .SCR1_AXI_RESP_BP   (0)
+    .SCR1_AXI_RESP_BP   (0),
 `endif // SCR1_DMEM_AXI_RESP_BP
+    .SCR1_AXI_BURST_ENABLE (SCR1_DCACHE_AXI_BURST_ENABLE),
+    .SCR1_AXI_MAX_READ_BURST_BEATS (SCR1_AXI_MAX_READ_BURST_BEATS)
 ) i_dmem_axi (
     .clk            (clk                    ),
     .rst_n          (axi_rst_n              ),
@@ -716,8 +761,13 @@ scr1_mem_axi #(
     .core_width     (axi_dmem_width         ),
     .core_addr      (axi_dmem_addr          ),
     .core_wdata     (axi_dmem_wdata         ),
+    .core_burst_len (axi_dmem_burst_len     ),
     .core_rdata     (axi_dmem_rdata         ),
     .core_resp      (axi_dmem_resp          ),
+    .core_rvalid    (axi_dmem_rvalid        ),
+    .core_rlast     (axi_dmem_rlast         ),
+    .core_beat_rdata(axi_dmem_beat_rdata    ),
+    .core_beat_resp (axi_dmem_beat_resp     ),
 
     // AXI I/O
     .awid           (io_axi_dmem_awid       ),
@@ -765,7 +815,6 @@ scr1_mem_axi #(
     .rvalid         (io_axi_dmem_rvalid     ),
     .rready         (io_axi_dmem_rready     )
 );
-
 //-------------------------------------------------------------------------------
 // AXI reinit logic
 //-------------------------------------------------------------------------------

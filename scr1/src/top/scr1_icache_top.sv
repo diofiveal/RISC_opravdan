@@ -2,10 +2,12 @@
 `include "scr1_arch_description.svh"
 
 module scr1_icache #(
-    parameter int unsigned ICACHE_SIZE_BYTES   = 2048,
-    parameter int unsigned ICACHE_LINE_BYTES   = 8,
-    parameter int unsigned ICACHE_WAYS         = 1,
-    parameter int unsigned ICACHE_VICTIM_LINES = 4
+    parameter int unsigned ICACHE_SIZE_BYTES          = 2048,
+    parameter int unsigned ICACHE_LINE_BYTES          = 8,
+    parameter int unsigned ICACHE_WAYS                = 1,
+    parameter int unsigned ICACHE_VICTIM_LINES        = 4,
+    parameter bit          ICACHE_AXI_BURST_ENABLE    = 1'b1,
+    parameter int unsigned ICACHE_MAX_READ_BURST_BEATS = 8
 ) (
     input  logic                         clk,
     input  logic                         rst_n,
@@ -23,6 +25,9 @@ module scr1_icache #(
     output logic                         memory_req_o,
     output type_scr1_mem_cmd_e           memory_cmd_o,
     output logic [`SCR1_IMEM_AWIDTH-1:0] memory_addr_o,
+    output logic [7:0]                   memory_burst_len_o,
+    input  logic                         memory_rvalid_i,
+    input  logic                         memory_rlast_i,
     input  logic [`SCR1_IMEM_DWIDTH-1:0] memory_rdata_i,
     input  type_scr1_mem_resp_e          memory_resp_i
 );
@@ -96,6 +101,10 @@ module scr1_icache #(
     logic                                     perf_lookup_event;
     logic                                     perf_lookup_hit;
     logic                                     perf_refill_word;
+    logic                                     perf_refill_burst;
+    logic                                     perf_burst_error;
+    logic                                     perf_victim_word_hit;
+    logic                                     perf_victim_swap;
 
     icache #(
         .ICACHE_DATA_WIDTH        (ICACHE_DATA_WIDTH),
@@ -172,7 +181,9 @@ module scr1_icache #(
         .ICACHE_REFILL_CNT_WIDTH  (ICACHE_REFILL_CNT_WIDTH),
         .ICACHE_BYTE_OFFSET_BITS  (ICACHE_BYTE_OFFSET_BITS),
         .VICTIM_LINES             (ICACHE_VICTIM_LINES),
-        .VICTIM_ENTRY_BITS        (ICACHE_VICTIM_ENTRY_BITS)
+        .VICTIM_ENTRY_BITS        (ICACHE_VICTIM_ENTRY_BITS),
+        .ICACHE_AXI_BURST_ENABLE  (ICACHE_AXI_BURST_ENABLE),
+        .ICACHE_MAX_READ_BURST_BEATS (ICACHE_MAX_READ_BURST_BEATS)
     ) i_icache_controller (
         .clk                         (clk),
         .rst_n                       (rst_n),
@@ -187,7 +198,10 @@ module scr1_icache #(
         .memory_req_o                (memory_req_o),
         .memory_cmd_o                (memory_cmd_o),
         .memory_addr_o               (memory_addr_o),
+        .memory_burst_len_o          (memory_burst_len_o),
         .memory_req_ack_i            (memory_req_ack_i),
+        .memory_rvalid_i             (memory_rvalid_i),
+        .memory_rlast_i              (memory_rlast_i),
         .memory_rdata_i              (memory_rdata_i),
         .memory_resp_i               (memory_resp_i),
 
@@ -233,15 +247,42 @@ module scr1_icache #(
         .perf_req_accept_o           (perf_req_accept),
         .perf_lookup_event_o         (perf_lookup_event),
         .perf_lookup_hit_o           (perf_lookup_hit),
-        .perf_refill_word_o          (perf_refill_word)
+        .perf_refill_word_o          (perf_refill_word),
+        .perf_refill_burst_o         (perf_refill_burst),
+        .perf_burst_error_o          (perf_burst_error),
+        .perf_victim_word_hit_o      (perf_victim_word_hit),
+        .perf_victim_swap_o          (perf_victim_swap)
     );
 
 `ifdef SCR1_TRGT_SIMULATION
+    initial begin
+        if (ICACHE_LINE_BYTES < ICACHE_WORD_BYTES) begin
+            $fatal(1, "scr1_icache: line must contain at least one data word");
+        end
+        if ((ICACHE_LINE_BYTES % ICACHE_WORD_BYTES) != 0) begin
+            $fatal(1, "scr1_icache: line size must be a whole number of words");
+        end
+        if ((ICACHE_LINE_BYTES & (ICACHE_LINE_BYTES - 1)) != 0) begin
+            $fatal(1, "scr1_icache: line size must be a power of two");
+        end
+        if ((4096 % ICACHE_LINE_BYTES) != 0) begin
+            $fatal(1, "scr1_icache: line size must divide the AXI 4 KiB boundary");
+        end
+        if (ICACHE_AXI_BURST_ENABLE
+            && (ICACHE_LINE_WORDS > ICACHE_MAX_READ_BURST_BEATS)) begin
+            $fatal(1, "scr1_icache: cache line exceeds maximum read burst");
+        end
+    end
+
     logic [63:0] perf_accesses;
     logic [63:0] perf_hits;
     logic [63:0] perf_misses;
     logic [63:0] perf_refill_words;
+    logic [63:0] perf_refill_bursts;
+    logic [63:0] perf_burst_errors;
     logic [63:0] perf_stall_cycles;
+    logic [63:0] perf_victim_word_hits;
+    logic [63:0] perf_victim_swaps;
 
     logic perf_request_active_q;
     logic perf_router_response;
@@ -252,12 +293,16 @@ module scr1_icache #(
 
     always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            perf_accesses         <= 64'd0;
-            perf_hits             <= 64'd0;
-            perf_misses           <= 64'd0;
-            perf_refill_words     <= 64'd0;
-            perf_stall_cycles     <= 64'd0;
-            perf_request_active_q <= 1'b0;
+            perf_accesses          <= 64'd0;
+            perf_hits              <= 64'd0;
+            perf_misses            <= 64'd0;
+            perf_refill_words      <= 64'd0;
+            perf_refill_bursts     <= 64'd0;
+            perf_burst_errors      <= 64'd0;
+            perf_stall_cycles      <= 64'd0;
+            perf_victim_word_hits  <= 64'd0;
+            perf_victim_swaps      <= 64'd0;
+            perf_request_active_q  <= 1'b0;
         end else begin
             if (perf_req_accept) begin
                 perf_accesses <= perf_accesses + 64'd1;
@@ -273,6 +318,22 @@ module scr1_icache #(
 
             if (perf_refill_word) begin
                 perf_refill_words <= perf_refill_words + 64'd1;
+            end
+
+            if (perf_refill_burst) begin
+                perf_refill_bursts <= perf_refill_bursts + 64'd1;
+            end
+
+            if (perf_burst_error) begin
+                perf_burst_errors <= perf_burst_errors + 64'd1;
+            end
+
+            if (perf_victim_word_hit) begin
+                perf_victim_word_hits <= perf_victim_word_hits + 64'd1;
+            end
+
+            if (perf_victim_swap) begin
+                perf_victim_swaps <= perf_victim_swaps + 64'd1;
             end
 
             if (perf_request_active_q) begin
@@ -294,11 +355,16 @@ module scr1_icache #(
         $display("========================================");
         $display(" I-cache counters");
         $display("========================================");
-        $display("accesses     : %0d", perf_accesses);
-        $display("hits         : %0d", perf_hits);
-        $display("misses       : %0d", perf_misses);
-        $display("refill words : %0d", perf_refill_words);
-        $display("stall cycles : %0d", perf_stall_cycles);
+        $display("accesses         : %0d", perf_accesses);
+        $display("L1 hits          : %0d", perf_hits);
+        $display("L1 misses        : %0d", perf_misses);
+        $display("victim word hits : %0d", perf_victim_word_hits);
+        $display("victim swaps     : %0d", perf_victim_swaps);
+        $display("refill words     : %0d", perf_refill_words);
+        $display("refill bursts    : %0d", perf_refill_bursts);
+        $display("burst errors     : %0d", perf_burst_errors);
+        $display("burst enabled    : %0d", ICACHE_AXI_BURST_ENABLE);
+        $display("stall cycles     : %0d", perf_stall_cycles);
         $display("========================================");
     end
 `endif

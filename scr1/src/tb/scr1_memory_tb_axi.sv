@@ -195,38 +195,81 @@ assign soft_irq = soft_irq_reg;
 
 generate for(gi=0; gi<N_IF; ++gi) begin : rw_if
 
+// Read-burst context. The SCR1 RTL uses only FIXED/INCR semantics here; cache
+// line refills use AXI INCR bursts. One read burst may be outstanding per TB
+// interface, which matches the blocking cache/bridge behavior used by SCR1.
+logic [W_ADR-1:0] read_addr_q;
+logic [7:0]       read_beats_left_q;
+logic [2:0]       read_size_q;
+logic [1:0]       read_burst_q;
+logic [W_ADR-1:0] read_next_addr;
+
+always_comb begin
+    case (read_burst_q)
+        2'b00:   read_next_addr = read_addr_q;
+        2'b01:   read_next_addr = read_addr_q + (W_ADR'(1) << read_size_q);
+        default: read_next_addr = read_addr_q;
+    endcase
+end
+
 //-------------------------------------------------------------------------------
 // Read operation
 //-------------------------------------------------------------------------------
 always @(posedge clk, negedge rst_n) begin
     if(~rst_n) begin
-        arready[gi] <= 1'b1;
-        rvalid[gi]  <= 1'b0;
-        rresp[gi]   <= 2'd3;
-        rdata[gi]   <= 'x;
-        rlast[gi]   <= 1'b0;
-        rid[gi]     <= '0;
+        arready[gi]          <= 1'b1;
+        rvalid[gi]           <= 1'b0;
+        rresp[gi]            <= 2'd3;
+        rdata[gi]            <= 'x;
+        rlast[gi]            <= 1'b0;
+        rid[gi]              <= '0;
+        read_addr_q          <= '0;
+        read_beats_left_q    <= '0;
+        read_size_q          <= '0;
+        read_burst_q         <= '0;
     end else begin
 
-        // Read data: acked
-        if( rvalid[gi] & rready[gi] ) begin
-            arready[gi] <= 1'b1;
-            rvalid[gi]  <= 1'b0;
-        end else if( rvalid[gi] & !rready[gi] ) begin
+        // Hold R channel data stable while the master applies backpressure.
+        if (rvalid[gi] && !rready[gi]) begin
             arready[gi] <= 1'b0;
         end
 
-        // Read data: valid
-        if( arvalid[gi] & arready[gi] & ~(rvalid[gi] & !rready[gi]) ) begin
+        // Current R beat accepted. For a burst, immediately prepare the next
+        // beat for the following cycle; otherwise release the AR channel.
+        if (rvalid[gi] && rready[gi]) begin
+            if (rlast[gi]) begin
+                rvalid[gi]  <= 1'b0;
+                rlast[gi]   <= 1'b0;
+                arready[gi] <= 1'b1;
+            end else begin
+                read_addr_q       <= read_next_addr;
+                read_beats_left_q <= read_beats_left_q - 1'b1;
+                rdata[gi]         <= mem_read( read_next_addr,
+                                               2**read_size_q,
+                                               W_DATA/8 );
+                rresp[gi]         <= '0;
+                rlast[gi]         <= (read_beats_left_q == 8'd1);
+                rvalid[gi]        <= 1'b1;
+                arready[gi]       <= 1'b0;
+            end
+        end
 
-            rvalid[gi] <= 1'b1;
-            rresp[gi]  <= '0;
-            rlast[gi]  <= 1'b1;
-            rid[gi]    <= arid[gi];
+        // Accept a new AXI read address only when no older read burst owns the
+        // interface. ARLEN is AXI encoded as beats-1.
+        if (arvalid[gi] && arready[gi] && !(rvalid[gi] && !rready[gi])) begin
+            arready[gi]       <= 1'b0;
+            rvalid[gi]        <= 1'b1;
+            rresp[gi]         <= '0;
+            rlast[gi]         <= (arlen[gi] == 8'd0);
+            rid[gi]           <= arid[gi];
+            read_addr_q       <= araddr[gi];
+            read_beats_left_q <= arlen[gi];
+            read_size_q       <= arsize[gi];
+            read_burst_q      <= arburst[gi];
 
-            rdata[gi]  <= mem_read( araddr[gi],
-                                    2**arsize[gi],
-                                    W_DATA/8 );
+            rdata[gi] <= mem_read( araddr[gi],
+                                   2**arsize[gi],
+                                   W_DATA/8 );
         end
     end
 end
@@ -372,12 +415,12 @@ SVA_TBMEM_X_ARCHANNEL :
     )
     else $error("TBMEM: X state on ar channel[%0d]",gi);
 
-SVA_TBMEM_ARLEN :
+SVA_TBMEM_ARBUST :
     assert property (
         @(negedge clk) disable iff (~rst_n)
-        arvalid[gi] |-> arlen[gi]==0
+        (arvalid[gi] && (arlen[gi] != 0)) |-> arburst[gi] == 2'b01
     )
-    else $error("TBMEM: arlen[%0d] = %0d is not supported",gi,arlen[gi]);
+    else $error("TBMEM: only AXI INCR read bursts are supported for ARLEN != 0 on interface %0d", gi);
 
 SVA_TBMEM_X_RREADY :
     assert property (

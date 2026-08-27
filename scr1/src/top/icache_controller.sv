@@ -13,7 +13,9 @@ module icache_controller #(
     parameter int unsigned ICACHE_BYTE_OFFSET_BITS,
     parameter int unsigned VICTIM_LINES = 4,
     parameter int unsigned VICTIM_ENTRY_BITS =
-        (VICTIM_LINES > 1) ? $clog2(VICTIM_LINES) : 1
+        (VICTIM_LINES > 1) ? $clog2(VICTIM_LINES) : 1,
+    parameter bit          ICACHE_AXI_BURST_ENABLE = 1'b1,
+    parameter int unsigned ICACHE_MAX_READ_BURST_BEATS = 8
 ) (
     input  logic                                          clk,
     input  logic                                          rst_n,
@@ -30,7 +32,10 @@ module icache_controller #(
     output logic                                          memory_req_o,
     output type_scr1_mem_cmd_e                            memory_cmd_o,
     output logic [ICACHE_ADDR_WIDTH-1:0]                  memory_addr_o,
+    output logic [7:0]                                    memory_burst_len_o,
     input  logic                                          memory_req_ack_i,
+    input  logic                                          memory_rvalid_i,
+    input  logic                                          memory_rlast_i,
     input  logic [ICACHE_DATA_WIDTH-1:0]                  memory_rdata_i,
     input  type_scr1_mem_resp_e                           memory_resp_i,
 
@@ -56,13 +61,13 @@ module icache_controller #(
     output logic [ICACHE_INDEX_BITS-1:0]                  cache_line_commit_index_o,
     output logic [ICACHE_TAG_BITS-1:0]                    cache_line_commit_tag_o,
 
-    // Victim cache-arraye lookup results
+    // Victim cache lookup results
     input logic                                           victim_lookup_hit_o,
     input logic [VICTIM_ENTRY_BITS-1:0]                   victim_lookup_entry_o,
     input logic [ICACHE_DATA_WIDTH-1:0]                   victim_lookup_data_o,
     input logic [ICACHE_LINE_WORDS*ICACHE_DATA_WIDTH-1:0] victim_lookup_line_o,
 
-    // Victim cache-array controls
+    // Victim cache controls
     output logic                                           victim_lookup_en_i,
     output logic [ICACHE_TAG_BITS-1:0]                     victim_lookup_tag_i,
     output logic [ICACHE_INDEX_BITS-1:0]                   victim_lookup_index_i,
@@ -74,7 +79,7 @@ module icache_controller #(
     output logic [ICACHE_INDEX_BITS-1:0]                   victim_write_index_i,
     output logic [ICACHE_LINE_WORDS*ICACHE_DATA_WIDTH-1:0] victim_write_line_i,
 
-    //invalidate victim entry
+    // Victim cache entry invalidation
     output logic                                           victim_invalidate_en_i,
     output logic [VICTIM_ENTRY_BITS-1:0]                   victim_invalidate_entry_i,
 
@@ -82,7 +87,11 @@ module icache_controller #(
     output logic                                           perf_req_accept_o,
     output logic                                           perf_lookup_event_o,
     output logic                                           perf_lookup_hit_o,
-    output logic                                           perf_refill_word_o
+    output logic                                           perf_refill_word_o,
+    output logic                                           perf_refill_burst_o,
+    output logic                                           perf_burst_error_o,
+    output logic                                           perf_victim_word_hit_o,
+    output logic                                           perf_victim_swap_o
 );
 
     localparam logic [ICACHE_REFILL_CNT_WIDTH-1:0] REFILL_LAST_CNT =
@@ -95,6 +104,8 @@ module icache_controller #(
         EVICT_READ_REQ,
         EVICT_READ_WAIT,
         VICTIM_WRITE,
+        SWAP_VICTIM_WRITE,
+        SWAP_L1_WRITE,
         REFILL_REQ,
         REFILL_WAIT,
         BYPASS_REQ,
@@ -121,6 +132,12 @@ module icache_controller #(
     logic [ICACHE_LINE_WORDS*ICACHE_DATA_WIDTH-1:0] evicted_line_q;
     logic [VICTIM_ENTRY_BITS-1:0]              victim_replace_ptr_q;
 
+    // Victim-hit context used by the swap/promotion sequence.
+    logic [VICTIM_ENTRY_BITS-1:0]              victim_hit_entry_q;
+    logic [ICACHE_LINE_WORDS*ICACHE_DATA_WIDTH-1:0] victim_hit_line_q;
+    logic [ICACHE_REFILL_CNT_WIDTH-1:0]        swap_cnt_q;
+    logic                                      swap_pending_q;
+
     logic [ICACHE_TAG_BITS-1:0]                incoming_tag;
     logic                                      incoming_uncached;
     logic [ICACHE_INDEX_BITS-1:0]              incoming_index;
@@ -133,11 +150,16 @@ module icache_controller #(
     logic [ICACHE_ADDR_WIDTH-1:0]              refill_addr;
 
     logic                                      refill_start_event;
+    logic                                      refill_beat_event;
     logic                                      refill_word_event;
+    logic                                      burst_error_event;
+    logic                                      burst_error_q;
     logic                                      evict_start_event;
     logic                                      evict_word_event;
     logic                                      victim_write_event;
+    logic                                      victim_hit_event;
     logic                                      evict_last_word;
+    logic                                      swap_last_word;
 
     // 0xFF00_0000..0xFFFF_FFFF is an uncached/MMIO/boot region for a
     // 32-bit SCR1 address space. Testing the most-significant byte makes the
@@ -168,6 +190,7 @@ module icache_controller #(
 
     assign refill_last_word = (refill_cnt_q == REFILL_LAST_CNT);
     assign evict_last_word  = (evict_cnt_q  == REFILL_LAST_CNT);
+    assign swap_last_word   = (swap_cnt_q   == REFILL_LAST_CNT);
 
     assign refill_base_addr = {
         req_addr_q[ICACHE_ADDR_WIDTH-1:ICACHE_OFFSET_BITS],
@@ -187,9 +210,10 @@ module icache_controller #(
         router_rdata_o   = response_rdata_q;
         router_resp_o    = SCR1_MEM_RESP_NOTRDY;
 
-        memory_req_o  = 1'b0;
-        memory_cmd_o  = SCR1_MEM_CMD_RD;
-        memory_addr_o = refill_addr;
+        memory_req_o       = 1'b0;
+        memory_cmd_o       = SCR1_MEM_CMD_RD;
+        memory_addr_o      = refill_addr;
+        memory_burst_len_o = 8'd0;
 
         cache_lookup_en_o          = 1'b0;
         cache_lookup_index_o       = incoming_index;
@@ -223,16 +247,23 @@ module icache_controller #(
         victim_invalidate_en_i    = 1'b0;
         victim_invalidate_entry_i = '0;
 
-        perf_req_accept_o   = 1'b0;
-        perf_lookup_event_o = 1'b0;
-        perf_lookup_hit_o   = lookup_hit;
-        perf_refill_word_o  = 1'b0;
+        perf_req_accept_o      = 1'b0;
+        perf_lookup_event_o    = 1'b0;
+        perf_lookup_hit_o      = lookup_hit;
+        perf_refill_word_o     = 1'b0;
+        perf_refill_burst_o    = 1'b0;
+        perf_burst_error_o     = 1'b0;
+        perf_victim_word_hit_o = 1'b0;
+        perf_victim_swap_o     = 1'b0;
 
         refill_start_event = 1'b0;
+        refill_beat_event  = 1'b0;
         refill_word_event  = 1'b0;
+        burst_error_event  = 1'b0;
         evict_start_event  = 1'b0;
         evict_word_event   = 1'b0;
         victim_write_event = 1'b0;
+        victim_hit_event   = 1'b0;
 
         case (state_q)
             IDLE: begin
@@ -275,12 +306,23 @@ module icache_controller #(
                 victim_lookup_en_i = 1'b1;
 
                 if (victim_lookup_hit_o) begin
-                    // Stage-1 policy: serve the instruction directly from the
-                    // victim cache. No promotion/swap is performed yet, so the
-                    // victim entry remains valid.
-                    router_rdata_o = victim_lookup_data_o;
-                    router_resp_o  = SCR1_MEM_RESP_RDY_OK;
-                    state_d = IDLE;
+                    // Count each requested instruction word served by Victim Cache.
+                    perf_victim_word_hit_o = 1'b1;
+
+                    // Capture the hit entry and the complete victim line.
+                    // If L1 currently holds a valid line, read it first and
+                    // exchange the two lines. Otherwise promote the victim line
+                    // into the empty L1 slot and free the victim entry.
+                    victim_hit_event = 1'b1;
+
+                    if (cache_lookup_valid_i) begin
+                        evict_start_event = 1'b1;
+                        state_d = EVICT_READ_REQ;
+                    end else begin
+                        victim_invalidate_en_i    = 1'b1;
+                        victim_invalidate_entry_i = victim_lookup_entry_o;
+                        state_d = SWAP_L1_WRITE;
+                    end
                 end else if (cache_lookup_valid_i) begin
                     // True miss and a valid line currently occupies this L1
                     // index. Preserve that line in Victim before refilling L1.
@@ -308,7 +350,11 @@ module icache_controller #(
                 evict_word_event = 1'b1;
 
                 if (evict_last_word) begin
-                    state_d = VICTIM_WRITE;
+                    if (swap_pending_q) begin
+                        state_d = SWAP_VICTIM_WRITE;
+                    end else begin
+                        state_d = VICTIM_WRITE;
+                    end
                 end else begin
                     state_d = EVICT_READ_REQ;
                 end
@@ -325,39 +371,137 @@ module icache_controller #(
                 state_d = REFILL_REQ;
             end
 
+            SWAP_VICTIM_WRITE: begin
+                // Replace the victim-hit entry with the line displaced from L1.
+                // This state is entered only for a real Victim <-> L1 swap.
+                // The round-robin pointer is intentionally not advanced here.
+                perf_victim_swap_o   = 1'b1;
+                victim_write_en_i    = 1'b1;
+                victim_write_entry_i = victim_hit_entry_q;
+                victim_write_tag_i   = evicted_tag_q;
+                victim_write_index_i = req_index_q;
+                victim_write_line_i  = evicted_line_q;
+
+                cache_line_invalidate_o = 1'b1;
+                state_d = SWAP_L1_WRITE;
+            end
+
+            SWAP_L1_WRITE: begin
+                // Write the victim-hit line into L1 using the existing refill
+                // port. One cache word is written per cycle.
+                cache_refill_we_o          = 1'b1;
+                cache_refill_index_o       = req_index_q;
+                cache_refill_word_offset_o =
+                    ICACHE_WORD_OFFSET_BITS'(swap_cnt_q);
+                cache_refill_data_o = victim_hit_line_q[
+                    ICACHE_DATA_WIDTH*swap_cnt_q +: ICACHE_DATA_WIDTH
+                ];
+
+                if (swap_last_word) begin
+                    cache_line_commit_o       = 1'b1;
+                    cache_line_commit_index_o = req_index_q;
+                    cache_line_commit_tag_o   = req_tag_q;
+
+                    router_rdata_o = victim_hit_line_q[
+                        ICACHE_DATA_WIDTH*req_word_offset_q +: ICACHE_DATA_WIDTH
+                    ];
+                    router_resp_o = SCR1_MEM_RESP_RDY_OK;
+                    state_d = IDLE;
+                end
+            end
+
             REFILL_REQ: begin
                 memory_req_o  = 1'b1;
                 memory_cmd_o  = SCR1_MEM_CMD_RD;
-                memory_addr_o = refill_addr;
+
+                if (ICACHE_AXI_BURST_ENABLE) begin
+                    // One aligned AXI request fetches the complete cache line.
+                    memory_addr_o      = refill_base_addr;
+                    memory_burst_len_o = 8'(ICACHE_LINE_WORDS - 1);
+                end else begin
+                    // Legacy AHB/single-beat path: one request per cache word.
+                    memory_addr_o      = refill_addr;
+                    memory_burst_len_o = 8'd0;
+                end
 
                 if (memory_req_ack_i) begin
+                    if (ICACHE_AXI_BURST_ENABLE) begin
+                        perf_refill_burst_o = 1'b1;
+                    end
                     state_d = REFILL_WAIT;
                 end
             end
 
             REFILL_WAIT: begin
-                memory_cmd_o  = SCR1_MEM_CMD_RD;
-                memory_addr_o = refill_addr;
+                memory_cmd_o = SCR1_MEM_CMD_RD;
 
-                if (memory_resp_i == SCR1_MEM_RESP_RDY_OK) begin
-                    cache_refill_we_o = 1'b1;
-                    perf_refill_word_o = 1'b1;
-                    refill_word_event = 1'b1;
+                if (ICACHE_AXI_BURST_ENABLE) begin
+                    memory_addr_o      = refill_base_addr;
+                    memory_burst_len_o = 8'(ICACHE_LINE_WORDS - 1);
 
-                    if (refill_last_word) begin
-                        cache_line_commit_o = 1'b1;
+                    // The AXI bridge exposes one pulse per accepted R beat.
+                    if (memory_rvalid_i) begin
+                        refill_beat_event = 1'b1;
 
-                        if (req_word_offset_q
-                            == ICACHE_WORD_OFFSET_BITS'(refill_cnt_q)) begin
-                            router_rdata_o = memory_rdata_i;
+                        if ((memory_resp_i == SCR1_MEM_RESP_RDY_OK)
+                            && !burst_error_q) begin
+                            cache_refill_we_o  = 1'b1;
+                            perf_refill_word_o = 1'b1;
+                            refill_word_event  = 1'b1;
+                        end else if (memory_resp_i == SCR1_MEM_RESP_RDY_ER) begin
+                            burst_error_event = 1'b1;
                         end
-                        router_resp_o = SCR1_MEM_RESP_RDY_OK;
-                        state_d = IDLE;
-                    end else begin
-                        state_d = REFILL_REQ;
+
+                        // RLAST must coincide with the configured final beat.
+                        if (memory_rlast_i != refill_last_word) begin
+                            burst_error_event = 1'b1;
+                        end
+
+                        if (memory_rlast_i) begin
+                            if (refill_last_word
+                                && (memory_resp_i == SCR1_MEM_RESP_RDY_OK)
+                                && !burst_error_q) begin
+                                cache_line_commit_o = 1'b1;
+
+                                if (req_word_offset_q
+                                    == ICACHE_WORD_OFFSET_BITS'(refill_cnt_q)) begin
+                                    router_rdata_o = memory_rdata_i;
+                                end
+                                router_resp_o = SCR1_MEM_RESP_RDY_OK;
+                            end else begin
+                                // Early RLAST, a previous beat error, or a late
+                                // RLAST after the expected line length.
+                                router_resp_o    = SCR1_MEM_RESP_RDY_ER;
+                                perf_burst_error_o = 1'b1;
+                            end
+                            state_d = IDLE;
+                        end
                     end
-                end else if (memory_resp_i == SCR1_MEM_RESP_RDY_ER) begin
-                    state_d = ERROR;
+                end else begin
+                    memory_addr_o      = refill_addr;
+                    memory_burst_len_o = 8'd0;
+
+                    if (memory_resp_i == SCR1_MEM_RESP_RDY_OK) begin
+                        cache_refill_we_o  = 1'b1;
+                        perf_refill_word_o = 1'b1;
+                        refill_beat_event  = 1'b1;
+                        refill_word_event  = 1'b1;
+
+                        if (refill_last_word) begin
+                            cache_line_commit_o = 1'b1;
+
+                            if (req_word_offset_q
+                                == ICACHE_WORD_OFFSET_BITS'(refill_cnt_q)) begin
+                                router_rdata_o = memory_rdata_i;
+                            end
+                            router_resp_o = SCR1_MEM_RESP_RDY_OK;
+                            state_d = IDLE;
+                        end else begin
+                            state_d = REFILL_REQ;
+                        end
+                    end else if (memory_resp_i == SCR1_MEM_RESP_RDY_ER) begin
+                        state_d = ERROR;
+                    end
                 end
             end
 
@@ -406,9 +550,14 @@ module icache_controller #(
             refill_cnt_q       <= '0;
             response_rdata_q   <= '0;
             evict_cnt_q        <= '0;
-            evicted_tag_q      <= '0;
-            evicted_line_q     <= '0;
+            evicted_tag_q       <= '0;
+            evicted_line_q      <= '0;
             victim_replace_ptr_q <= '0;
+            victim_hit_entry_q   <= '0;
+            victim_hit_line_q    <= '0;
+            swap_cnt_q           <= '0;
+            swap_pending_q       <= 1'b0;
+            burst_error_q        <= 1'b0;
         end else begin
             state_q <= state_d;
 
@@ -419,6 +568,23 @@ module icache_controller #(
                 req_tag_q         <= incoming_tag;
                 req_index_q       <= incoming_index;
                 req_word_offset_q <= incoming_word_offset;
+            end
+
+            if (victim_hit_event) begin
+                victim_hit_entry_q <= victim_lookup_entry_o;
+                victim_hit_line_q  <= victim_lookup_line_o;
+                swap_cnt_q         <= '0;
+                swap_pending_q     <= cache_lookup_valid_i;
+            end else begin
+                if ((state_q == SWAP_L1_WRITE) && !swap_last_word) begin
+                    swap_cnt_q <= swap_cnt_q + 1'b1;
+                end
+
+                if ((state_q == SWAP_VICTIM_WRITE)
+                    || ((state_q == SWAP_L1_WRITE) && swap_last_word)
+                    || ((state_q == VICTIM_LOOKUP) && !victim_lookup_hit_o)) begin
+                    swap_pending_q <= 1'b0;
+                end
             end
 
             if (evict_start_event) begin
@@ -445,9 +611,15 @@ module icache_controller #(
             end
 
             if (refill_start_event) begin
-                refill_cnt_q <= '0;
-            end else if (refill_word_event && !refill_last_word) begin
-                refill_cnt_q <= refill_cnt_q + 1'b1;
+                refill_cnt_q  <= '0;
+                burst_error_q <= 1'b0;
+            end else begin
+                if (refill_beat_event && !refill_last_word) begin
+                    refill_cnt_q <= refill_cnt_q + 1'b1;
+                end
+                if (burst_error_event) begin
+                    burst_error_q <= 1'b1;
+                end
             end
 
             if (refill_word_event
@@ -457,5 +629,30 @@ module icache_controller #(
             end
         end
     end
+
+`ifdef SCR1_TRGT_SIMULATION
+    initial begin
+        if ((ICACHE_DATA_WIDTH % 8) != 0) begin
+            $fatal(1, "icache_controller: data width must be byte aligned");
+        end
+        if (ICACHE_AXI_BURST_ENABLE
+            && ((ICACHE_LINE_WORDS < 1)
+                || (ICACHE_LINE_WORDS > ICACHE_MAX_READ_BURST_BEATS))) begin
+            $fatal(1, "icache_controller: line exceeds maximum AXI read burst");
+        end
+        if ((ICACHE_MAX_READ_BURST_BEATS < 1)
+            || (ICACHE_MAX_READ_BURST_BEATS > 256)) begin
+            $fatal(1, "icache_controller: invalid maximum AXI burst length");
+        end
+    end
+
+    always_ff @(posedge clk) begin
+        if (rst_n && ICACHE_AXI_BURST_ENABLE
+            && (state_q == REFILL_WAIT) && memory_rvalid_i) begin
+            assert (memory_rlast_i == refill_last_word)
+                else $error("icache_controller: AXI RLAST position mismatch");
+        end
+    end
+`endif
 
 endmodule

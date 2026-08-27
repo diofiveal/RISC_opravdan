@@ -493,10 +493,35 @@ module scr1_icache_tb;
         check_read(AW'(32'h0000_1008), 0, SCR1_MEM_RESP_RDY_OK, "hit word 2");
         check_read(AW'(32'h0000_100C), 0, SCR1_MEM_RESP_RDY_OK, "hit word 3");
 
-        $display("\n=== Test 2: same index, different tag ===");
-        check_read(AW'(32'h0000_2008), 4, SCR1_MEM_RESP_RDY_OK, "conflict miss");
-        check_read(AW'(32'h0000_200C), 0, SCR1_MEM_RESP_RDY_OK, "hit after replacement");
-        check_read(AW'(32'h0000_1008), 4, SCR1_MEM_RESP_RDY_OK, "old tag was evicted");
+        $display("\n=== Test 2: victim-cache hit and L1 swap ===");
+        check_read(AW'(32'h0000_2008), 4, SCR1_MEM_RESP_RDY_OK, "conflict miss moves old line to victim");
+        check_read(AW'(32'h0000_200C), 0, SCR1_MEM_RESP_RDY_OK, "L1 hit after conflict refill");
+        check_read(AW'(32'h0000_1008), 0, SCR1_MEM_RESP_RDY_OK, "victim hit swaps old line back to L1");
+        check_read(AW'(32'h0000_2008), 0, SCR1_MEM_RESP_RDY_OK, "reverse victim hit swaps line back");
+
+`ifdef SCR1_TRGT_SIMULATION
+        if (i_icache.perf_victim_word_hits != 64'd2) begin
+            $fatal(
+                1,
+                "[TB FAIL] victim word hit counter: expected=2 got=%0d",
+                i_icache.perf_victim_word_hits
+            );
+        end
+
+        if (i_icache.perf_victim_swaps != 64'd2) begin
+            $fatal(
+                1,
+                "[TB FAIL] victim swap counter: expected=2 got=%0d",
+                i_icache.perf_victim_swaps
+            );
+        end
+
+        $display(
+            "[TB PASS] victim counters: word_hits=%0d swaps=%0d",
+            i_icache.perf_victim_word_hits,
+            i_icache.perf_victim_swaps
+        );
+`endif
 
         $display("\n=== Test 3: memory request backpressure ===");
         mem_ack_delay_cfg = 3;

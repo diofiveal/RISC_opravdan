@@ -14,7 +14,12 @@
  `define SCR1_IMEM_ROUTER_EN
 `endif // SCR1_TCM_EN
 
-module scr1_top_ahb (
+module scr1_top_ahb #(
+    parameter int unsigned SCR1_ICACHE_LINE_BYTES = 8,
+    parameter int unsigned SCR1_DCACHE_LINE_BYTES = 8,
+    // 1: no-write-allocate on cacheable STORE miss; 0: legacy write-allocate.
+    parameter bit SCR1_DCACHE_NO_WRITE_ALLOCATE = 1'b1
+) (
     // Control
     input   logic                                   pwrup_rst_n,            // Power-Up Reset
     input   logic                                   rst_n,                  // Regular Reset signal
@@ -150,6 +155,10 @@ logic [`SCR1_DMEM_AWIDTH-1:0] dcache_dmem_addr;
 logic [`SCR1_DMEM_DWIDTH-1:0] dcache_dmem_wdata;
 logic [`SCR1_DMEM_DWIDTH-1:0] dcache_dmem_rdata;
 type_scr1_mem_resp_e          dcache_dmem_resp;
+
+// Four cacheable stores can retire ahead of the external memory response.
+// Keep the depth explicit at the SoC top so FPGA builds have one clear knob.
+localparam int unsigned SCR1_DCACHE_WRITE_BUFFER_DEPTH = 4;
 
 `ifdef SCR1_TCM_EN
 // Instruction memory interface from router to TCM
@@ -397,7 +406,11 @@ scr1_imem_router #(
     .port1_resp     (tcm_imem_resp    )
  `endif // SCR1_TCM_EN
 );
-scr1_icache i_icache (
+scr1_icache #(
+    .ICACHE_LINE_BYTES           (SCR1_ICACHE_LINE_BYTES),
+    .ICACHE_AXI_BURST_ENABLE     (1'b0),
+    .ICACHE_MAX_READ_BURST_BEATS (8)
+) i_icache (
     .clk                 (clk),
     .rst_n               (core_rst_n_local),
 
@@ -414,6 +427,11 @@ scr1_icache i_icache (
     .memory_req_o        (ahb_imem_req),
     .memory_cmd_o        (ahb_imem_cmd),
     .memory_addr_o       (ahb_imem_addr),
+    .memory_burst_len_o  (),
+    .memory_rvalid_i     ((ahb_imem_resp == SCR1_MEM_RESP_RDY_OK)
+                          || (ahb_imem_resp == SCR1_MEM_RESP_RDY_ER)),
+    .memory_rlast_i      ((ahb_imem_resp == SCR1_MEM_RESP_RDY_OK)
+                          || (ahb_imem_resp == SCR1_MEM_RESP_RDY_ER)),
     .memory_rdata_i      (ahb_imem_rdata),
     .memory_resp_i       (ahb_imem_resp)
 );
@@ -503,7 +521,13 @@ scr1_dmem_router #(
     //.port0_rdata    (ahb_dmem_rdata      ),
     //.port0_resp     (ahb_dmem_resp       )
 );
-scr1_dcache i_dcache (
+scr1_dcache #(
+    .DCACHE_LINE_BYTES         (SCR1_DCACHE_LINE_BYTES),
+    .DCACHE_WRITE_BUFFER_DEPTH (SCR1_DCACHE_WRITE_BUFFER_DEPTH),
+    .DCACHE_NO_WRITE_ALLOCATE  (SCR1_DCACHE_NO_WRITE_ALLOCATE),
+    .DCACHE_AXI_BURST_ENABLE   (1'b0),
+    .DCACHE_MAX_READ_BURST_BEATS (8)
+) i_dcache (
     .clk                (clk),
     .rst_n              (core_rst_n_local),
 
@@ -523,7 +547,12 @@ scr1_dcache i_dcache (
     .memory_width_o     (ahb_dmem_width),
     .memory_addr_o      (ahb_dmem_addr),
     .memory_wdata_o     (ahb_dmem_wdata),
+    .memory_burst_len_o (),
     .memory_req_ack_i   (ahb_dmem_req_ack),
+    .memory_rvalid_i    ((ahb_dmem_resp == SCR1_MEM_RESP_RDY_OK)
+                         || (ahb_dmem_resp == SCR1_MEM_RESP_RDY_ER)),
+    .memory_rlast_i     ((ahb_dmem_resp == SCR1_MEM_RESP_RDY_OK)
+                         || (ahb_dmem_resp == SCR1_MEM_RESP_RDY_ER)),
     .memory_rdata_i     (ahb_dmem_rdata),
     .memory_resp_i      (ahb_dmem_resp)
 );

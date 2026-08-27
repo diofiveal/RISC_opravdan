@@ -1,0 +1,33 @@
+# External SCR1 dependencies
+scr1/dependencies/coremark/
+scr1/dependencies/riscv-arch/
+scr1/dependencies/riscv-tests/
+scr1/dependencies/riscv-compliance/
+
+# Dependencies inside upgrade snapshots
+upgrades/**/dependencies/coremark/
+upgrades/**/dependencies/riscv-arch/
+upgrades/**/dependencies/riscv-tests/
+upgrades/**/dependencies/riscv-compliance/
+
+# Build artifacts
+build/
+scr1/build/
+**/build/
+
+# Simulation outputs
+*.vcd
+*.fst
+*.log
+*.tmp
+*.bak
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Editor / OS files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
