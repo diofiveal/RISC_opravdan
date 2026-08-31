@@ -1,0 +1,25 @@
+scr1_top_tb_ahb
+[0;34m---Test:                     coremark.hex[0m
+CoreMark 1.0
+2K performance run parameters for coremark.
+CoreMark Size    : 666
+Total ticks      : 4555
+Total time (secs): 0
+ERROR! Must execute for at least 10 secs for a valid result!
+Iterations       : 1
+Compiler version : GCC14.2.0
+Compiler flags   : -O3 -funroll-loops -fpeel-loops -fgcse-sm -fgcse-las -flto
+Memory location  : STATIC
+seedcrc          : 0xe9f5
+[0]crclist       : 0xe714
+[0]crcmatrix     : 0x1fd7
+[0]crcstate      : 0x8e3a
+[0]crcfinal      : 0xe714
+Errors detected
+[0;32mTest passed[0m
+
+#--------------------------------------
+# Summary: 1/1 tests passed
+#--------------------------------------
+
+- /mnt/c/users/nikita/desktop/scr1-sdk/scr1/src/tb/scr1_top_tb_runtests.sv:199: Verilog $finish
