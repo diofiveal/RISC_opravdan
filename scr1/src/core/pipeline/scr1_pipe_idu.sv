@@ -57,6 +57,13 @@ module scr1_pipe_idu
     output logic                           idu2ifu_branch_req_o,
     output logic [`SCR1_XLEN-1:0]          idu2ifu_branch_target_o,
 `endif
+`ifdef SCR1_BPU_EN
+    input   logic                          ifu2idu_bpu_pred_i,
+    input   logic                          ifu2idu_bpu_vld_i,
+
+    output  logic                          idu2exu_bpu_pred_o,
+    output  logic                          idu2exu_bpu_vld_o,
+`endif
     input   logic                           exu2idu_rdy_i           // EXU ready for new data
 
 );
@@ -103,6 +110,12 @@ assign idu2ifu_rdy_o  = exu2idu_rdy_i;
 assign idu2exu_req_o  = ifu2idu_vd_i;
 assign instr          = ifu2idu_instr_i;
 
+`ifdef SCR1_BPU_EN
+
+assign idu2exu_bpu_pred_o = ifu2idu_bpu_pred_i;
+assign idu2exu_bpu_vld_o  = ifu2idu_bpu_vld_i;
+
+`endif // SCR1_BPU_EN
 // RVI / RVC
 assign instr_type   = type_scr1_instr_type_e'(instr[1:0]);
 

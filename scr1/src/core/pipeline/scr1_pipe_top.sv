@@ -307,6 +307,23 @@ type_scr1_exc_code_e                mem2exu_exc_code;
 
 `endif
 
+`ifdef SCR1_BPU_EN
+
+// IFU -> IDU
+logic                       ifu2idu_bpu_pred;
+logic                       ifu2idu_bpu_vld;
+
+// IDU -> EXU
+logic                       idu2exu_bpu_pred;
+logic                       idu2exu_bpu_vld;
+
+// EXU -> IFU, BPU training
+logic                       exu2ifu_bpu_train_vld;
+logic [`SCR1_XLEN-1:0]      exu2ifu_bpu_train_pc;
+logic                       exu2ifu_bpu_train_taken;
+
+`endif // SCR1_BPU_EN
+
 //-------------------------------------------------------------------------------
 // Pipeline logic
 //-------------------------------------------------------------------------------
@@ -366,6 +383,15 @@ scr1_pipe_ifu i_pipe_ifu (
     .idu2ifu_branch_target_i (idu2ifu_branch_target),
 `endif // SCR1_EARLY_BRANCH
 
+`ifdef SCR1_BPU_EN
+    .ifu2idu_bpu_pred_o        (ifu2idu_bpu_pred),
+    .ifu2idu_bpu_vld_o         (ifu2idu_bpu_vld),
+
+    .exu2ifu_bpu_train_vld_i   (exu2ifu_bpu_train_vld),
+    .exu2ifu_bpu_train_pc_i    (exu2ifu_bpu_train_pc),
+    .exu2ifu_bpu_train_taken_i (exu2ifu_bpu_train_taken),
+`endif
+
     // IFU <-> IDU interface
     .idu2ifu_rdy_i            (idu2ifu_rdy        ),
     .ifu2idu_instr_o          (ifu2idu_instr      ),
@@ -405,6 +431,13 @@ scr1_pipe_idu i_pipe_idu (
     .idu2ifu_branch_req_o    (idu2ifu_branch_req),
     .idu2ifu_branch_target_o (idu2ifu_branch_target),
 `endif // SCR1_EARLY_BRANCH
+`ifdef SCR1_BPU_EN
+    .ifu2idu_bpu_pred_i      (ifu2idu_bpu_pred  ),
+    .ifu2idu_bpu_vld_i       (ifu2idu_bpu_vld   ),
+ 
+    .idu2exu_bpu_pred_o      (idu2exu_bpu_pred  ),
+    .idu2exu_bpu_vld_o       (idu2exu_bpu_vld   ),
+`endif
     .exu2idu_rdy_i          (exu2idu_rdy       )
 );
 
@@ -429,6 +462,14 @@ scr1_pipe_exu i_pipe_exu (
     .idu2exu_use_rd_i               (idu2exu_use_rd          ),
     .idu2exu_use_imm_i              (idu2exu_use_imm         ),
 `endif // SCR1_NO_EXE_STAGE
+`ifdef SCR1_BPU_EN
+    .idu2exu_bpu_pred_i             (idu2exu_bpu_pred        ),
+    .idu2exu_bpu_vld_i              (idu2exu_bpu_vld         ),
+
+    .exu2ifu_bpu_train_vld_o        (exu2ifu_bpu_train_vld   ),
+    .exu2ifu_bpu_train_pc_o         (exu2ifu_bpu_train_pc    ),
+    .exu2ifu_bpu_train_taken_o      (exu2ifu_bpu_train_taken ),
+`endif
 
     // EXU <-> MPRF interface
     .exu2mprf_rs1_addr_o            (exu2mprf_rs1_addr       ),
