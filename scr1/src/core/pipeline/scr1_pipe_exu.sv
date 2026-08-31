@@ -70,6 +70,22 @@ module scr1_pipe_exu (
     input   logic                               idu2exu_use_rd_i,           // Clock gating on rd_addr field
     input   logic                               idu2exu_use_imm_i,          // Clock gating on imm field
 `endif // SCR1_NO_EXE_STAGE
+`ifdef SCR1_BPU_EN
+    // BPU interface
+    input   logic                               idu2exu_bpu_pred_i,         // BPU predicted taken
+    input   logic                               idu2exu_bpu_vld_i,          // BPU prediction valid
+    output  logic                               exu2ifu_bpu_train_vld_o,    // BPU train valid
+    output  logic [`SCR1_XLEN-1:0]              exu2ifu_bpu_train_pc_o,     // BPU train PC
+    output  logic                               exu2ifu_bpu_train_taken_o,  // BPU train taken
+    // OPTIMIZATION: RAS training interface (push/pop at commit time)
+    output  logic                               exu2ifu_bpu_ras_push_o,      // RAS push (call: JAL/JALR/C.JAL/C.JALR with rd=ra)
+    output  logic [`SCR1_XLEN-1:0]              exu2ifu_bpu_ras_push_addr_o, // RAS push address (PC+2/4)
+    output  logic                               exu2ifu_bpu_ras_is_return_o, // RAS pop (return: JALR rs1=ra rd=x0, C.JR rs1=ra)
+    // OPTIMIZATION: BPU steer bypass flag (for conditional FIX #4)
+    input   logic                               idu2exu_bpu_steer_bypass_i, // Instruction was bypassed & BPU steered
+    input   logic                               idu2exu_bpu_str_i,          // v20: slot was BPU-steered (queue clean behind)
+    input   logic [`SCR1_XLEN-1:0]              idu2exu_bpu_target_i,       // v20: BPU predicted target
+`endif // SCR1_BPU_EN
 
     // EXU <-> MPRF interface
     output  logic [`SCR1_MPRF_AWIDTH-1:0]       exu2mprf_rs1_addr_o,        // MPRF rs1 read address
@@ -159,6 +175,9 @@ module scr1_pipe_exu (
     output  logic [`SCR1_XLEN-1:0]              exu2csr_pc_next_o,          // Next PC
     output  logic                               exu2ifu_pc_new_req_o,       // New PC request
     output  logic [`SCR1_XLEN-1:0]              exu2ifu_pc_new_o            // New PC data
+`ifdef SCR1_BPU_EN
+    ,output  logic                              exu2ifu_bpu_flush_o         // Flush BHT on FENCE.I
+`endif // SCR1_BPU_EN
 );
 
 //------------------------------------------------------------------------------
@@ -252,6 +271,24 @@ logic [`SCR1_XLEN-1:0]              inc_pc;
 logic                               branch_taken;
 logic                               jb_taken;
 logic [`SCR1_XLEN-1:0]              jb_new_pc;
+`ifdef SCR1_BPU_EN
+// FIX #1 [BUG-EXU-BPU-TIMING]: Latch BPU prediction alongside the instruction.
+// In the 3-stage pipeline (SCR1_NO_DEC_STAGE), the instruction is latched into
+// exu_queue and executed in the NEXT cycle. However, idu2exu_bpu_pred_i and
+// idu2exu_bpu_vld_i are live combinational inputs that correspond to the
+// instruction IDU is sending THIS cycle (the next instruction), not the one
+// currently in exu_queue. Using live signals caused misprediction checks to
+// compare the wrong prediction with the actual branch outcome, leading to
+// missed mispredictions and spurious flushes.
+logic                               exu_bpu_pred_ff;
+logic                               exu_bpu_vld_ff;
+// OPTIMIZATION: Latch steer_bypass flag for conditional FIX #4 logic.
+// Tracks whether the instruction in exu_queue was bypassed (queue was empty)
+// AND BPU steered (predicted taken) at fetch time.
+logic                               exu_bpu_steer_bypass_ff;
+logic                               exu_bpu_str_ff;
+logic [`SCR1_XLEN-1:0]              exu_bpu_target_ff;
+`endif // SCR1_BPU_EN
 `ifndef SCR1_RVC_EXT
 logic                               jb_misalign;
 `endif
@@ -367,6 +404,15 @@ always_ff @(posedge clk) begin
         if (idu2exu_use_imm_i) begin
             exu_queue.imm        <= idu2exu_cmd_i.imm;
         end
+`ifdef SCR1_BPU_EN
+        // FIX #1 [BUG-EXU-BPU-TIMING]: Latch BPU prediction with the instruction.
+        exu_bpu_pred_ff       <= idu2exu_bpu_pred_i;
+        exu_bpu_vld_ff        <= idu2exu_bpu_vld_i;
+        // OPTIMIZATION: Latch steer_bypass flag for conditional FIX #4 logic
+        exu_bpu_steer_bypass_ff <= idu2exu_bpu_steer_bypass_i;
+        exu_bpu_str_ff          <= idu2exu_bpu_str_i;
+        exu_bpu_target_ff       <= idu2exu_bpu_target_i;
+`endif // SCR1_BPU_EN
     end
 end
 
@@ -379,6 +425,16 @@ assign exu_queue_barrier = wfi_halted_ff | wfi_run_start_ff
 ;
 assign exu_queue_vd  = idu2exu_req_i & ~exu_queue_barrier;
 assign exu_queue     = idu2exu_cmd_i;
+`ifdef SCR1_BPU_EN
+// FIX #1 [BUG-EXU-BPU-TIMING]: In NO_EXE_STAGE mode, exu_queue is combinational
+// (no latching delay), so BPU signals are used directly — no latch needed.
+assign exu_bpu_pred_ff = idu2exu_bpu_pred_i;
+assign exu_bpu_vld_ff  = idu2exu_bpu_vld_i;
+// OPTIMIZATION: Latch steer_bypass flag for conditional FIX #4 logic
+assign exu_bpu_steer_bypass_ff = idu2exu_bpu_steer_bypass_i;
+assign exu_bpu_str_ff          = idu2exu_bpu_str_i;
+assign exu_bpu_target_ff       = idu2exu_bpu_target_i;
+`endif // SCR1_BPU_EN
 
 `endif // ~SCR1_NO_EXE_STAGE
 
@@ -608,9 +664,10 @@ assign wfi_run_req   = wfi_halted_ff  & (csr2exu_ip_ie_i
 //------------------------------------------------------------------------------
 
 `ifndef SCR1_CLKCTRL_EN
-always_ff @(negedge rst_n, posedge clk) begin
+// BUG-3 FIX [EXU-WFI-SENSITIVITY-1]: Standardized sensitivity list.
+always_ff @(posedge clk or negedge rst_n) begin
 `else // SCR1_CLKCTRL_EN
-always_ff @(negedge rst_n, posedge clk_alw_on) begin
+always_ff @(posedge clk_alw_on or negedge rst_n) begin
 `endif // SCR1_CLKCTRL_EN
     if (~rst_n) begin
         wfi_run_start_ff <= 1'b0;
@@ -627,9 +684,10 @@ assign wfi_run_start_next = wfi_halted_ff & csr2exu_ip_ie_i & ~exu2csr_take_irq_
 assign wfi_halted_upd = wfi_halt_req | wfi_run_req;
 
 `ifndef SCR1_CLKCTRL_EN
-always_ff @(negedge rst_n, posedge clk) begin
+// BUG-3 FIX [EXU-WFI-SENSITIVITY-2]: Standardized sensitivity list.
+always_ff @(posedge clk or negedge rst_n) begin
 `else // SCR1_CLKCTRL_EN
-always_ff @(negedge rst_n, posedge clk_alw_on) begin
+always_ff @(posedge clk_alw_on or negedge rst_n) begin
 `endif // SCR1_CLKCTRL_EN
     if (~rst_n) begin
         wfi_halted_ff <= 1'b0;
@@ -683,7 +741,10 @@ assign pc_curr_upd = ((exu2pipe_instret_o | exu2csr_take_irq_o
 `endif // SCR1_DBG_EN
                    ));
 
-always_ff @(negedge rst_n, posedge clk) begin
+// BUG-3 FIX [EXU-PC-SENSITIVITY]: Standardized sensitivity list to
+// @(posedge clk or negedge rst_n). Original @(negedge rst_n, posedge clk)
+// is non-standard and may cause FPGA timing issues.
+always_ff @(posedge clk or negedge rst_n) begin
     if (~rst_n) begin
         pc_curr_ff <= SCR1_RST_VECTOR;
     end else if (pc_curr_upd) begin
@@ -697,7 +758,38 @@ assign inc_pc = pc_curr_ff + (exu_queue.instr_rvc ? `SCR1_XLEN'd2 : `SCR1_XLEN'd
 assign inc_pc = pc_curr_ff + `SCR1_XLEN'd4;
 `endif // ~SCR1_RVC_EXT
 
+// FIX #4-v15 [EXU-PC-NEXT]: Standard pc_curr_next without jb_taken shortcut.
+// v14 Proposal 1A (jb_taken ? jb_new_pc) was reverted because it relied on
+// Proposal 1B's conditional flush being safe. The conditional flush caused
+// wrong-path instructions already in the IFU queue to survive for correctly-
+// predicted taken aligned 32-bit branches (e.g., in loops where IFU had
+// speculatively fetched instructions beyond the branch). These stale
+// instructions were then executed, corrupting register state.
+// With unconditional FIX #4 flush, exu2ifu_pc_new_req_o always fires for
+// correctly-predicted taken branches, so pc_curr_next = exu2ifu_pc_new_o.
+// v21 FIX [EXU-PC-SKIP]: with the zero-bubble flush-skip active the redirect
+// does NOT fire, yet the fetch stream IS at the branch target (it was
+// steered). pc_curr must follow the target, not the fall-through — otherwise
+// the next instruction executes with a wrong PC: its own jump target, the
+// trap return PC and the BHT training index all corrupt.
+`ifdef SCR1_BPU_EN
+logic bpu_flush_skip;
+// v21: JALR no longer excluded. The (exu_bpu_target_ff == jb_new_pc) compare
+// is the real safety guard: a RAS-predicted return whose predicted target
+// equals the resolved target needs no redirect, exactly like any other
+// correctly predicted taken branch. This makes correctly predicted returns
+// zero-bubble (dhrystone/coremark list processing is return-heavy).
+assign bpu_flush_skip = exu_queue_vd & jb_taken
+                        & exu_bpu_vld_ff & exu_bpu_pred_ff
+                        & (exu_bpu_steer_bypass_ff | exu_bpu_str_ff)
+                        & (exu_bpu_target_ff == jb_new_pc);
+`else // ~SCR1_BPU_EN
+logic bpu_flush_skip;
+assign bpu_flush_skip = 1'b0;
+`endif // SCR1_BPU_EN
+
 assign pc_curr_next = exu2ifu_pc_new_req_o        ? exu2ifu_pc_new_o
+                    : bpu_flush_skip              ? jb_new_pc
                     : (inc_pc[6] ^ pc_curr_ff[6]) ? inc_pc
                                                   : {pc_curr_ff[`SCR1_XLEN-1:6], inc_pc[5:0]};
 
@@ -715,9 +807,44 @@ always_comb begin
 `endif // SCR1_DBG_EN
         wfi_run_start_ff    : exu2ifu_pc_new_o = pc_curr_ff;
         exu_queue.fencei_req: exu2ifu_pc_new_o = inc_pc;
+`ifdef SCR1_BPU_EN
+        bpu_mispredict       : exu2ifu_pc_new_o = jb_taken ? jb_new_pc : inc_pc;
+`endif // SCR1_BPU_EN
         default             : exu2ifu_pc_new_o = ialu_addr_res & SCR1_JUMP_MASK;
     endcase
 end
+
+`ifdef SCR1_BPU_EN
+// BPU misprediction detection:
+//   1. Predicted taken, but branch/jump doesn't take (wrong direction)
+//   2. JALR not predicted by BPU (target depends on rs1, no RAS prediction)
+//   3. Jump/Branch taken but BPU didn't predict it
+logic bpu_mispredict;
+logic bpu_pred_taken_eff;
+// FIX #1 [BUG-EXU-BPU-TIMING]: Use latched BPU prediction (exu_bpu_pred_ff/vld_ff)
+// instead of live idu2exu_bpu_* inputs. The live inputs correspond to the NEXT
+// instruction from IDU, not the one currently executing in exu_queue.
+assign bpu_pred_taken_eff = exu_bpu_vld_ff & exu_bpu_pred_ff;
+// OPTIMIZATION: JALR is only mispredicted if BPU didn't predict it taken.
+// With RAS, BPU can correctly predict JALR returns (rs1=ra, rd=x0).
+// Previously ALL JALR were flagged as misprediction unconditionally.
+assign bpu_mispredict = exu_queue_vd & (
+    // Predicted taken but actually not taken
+    (bpu_pred_taken_eff & ~jb_taken & (exu_queue.branch_req | exu_queue.jump_req))
+    // JALR: mispredict only if BPU didn't predict it
+    | (exu_queue.jump_req & (exu_queue.sum2_op == SCR1_SUM2_OP_REG_IMM)
+       & ~bpu_pred_taken_eff)
+    // Taken but BPU didn't predict it
+    | (jb_taken & ~bpu_pred_taken_eff & (exu_queue.branch_req | exu_queue.jump_req))
+);
+`endif // SCR1_BPU_EN
+
+// OPTIMIZATION: JALR instruction flag for conditional FIX #4 logic.
+// JALR always requires IFU queue flush because even if RAS correctly predicted
+// the direction, the actual computed target may differ from the RAS prediction.
+logic is_jalr_inst;
+assign is_jalr_inst = exu_queue.jump_req
+                        & (exu_queue.sum2_op == SCR1_SUM2_OP_REG_IMM);
 
 assign exu2ifu_pc_new_req_o = init_pc                                        // reset
                             | exu2csr_take_irq_o
@@ -732,7 +859,21 @@ assign exu2ifu_pc_new_req_o = init_pc                                        // 
 `ifdef SCR1_DBG_EN
                             | dbg_run_start_npbuf
 `endif // SCR1_DBG_EN
-                            | (exu_queue_vd & jb_taken);
+                            | (exu_queue_vd & jb_taken
+`ifdef SCR1_BPU_EN
+// FIX #4 [BUG-EXU-FLUSH-CORRECT-PRED] + v21 [EXU-FLUSH-SKIP]: a correctly
+// predicted taken non-JALR branch whose fetch was steered (queue behind it is
+// clean) needs NO redirect — the fetch stream is already at the target.
+// Skipping the flush makes the branch zero-bubble.
+                              & exu_bpu_vld_ff
+                              & exu_bpu_pred_ff
+                              & ~bpu_flush_skip
+`endif // SCR1_BPU_EN
+                             )
+`ifdef SCR1_BPU_EN
+                            | bpu_mispredict
+`endif // SCR1_BPU_EN
+                            ;
 
 // Jump/branch signals
 assign branch_taken = exu_queue.branch_req & ialu_cmp;
@@ -744,6 +885,54 @@ assign exu2csr_pc_next_o  = ~exu_queue_vd ? pc_curr_ff
                           : jb_taken      ? jb_new_pc
                                           : inc_pc;
 assign exu2pipe_pc_curr_o = pc_curr_ff;
+
+`ifdef SCR1_BPU_EN
+//------------------------------------------------------------------------------
+// BPU training outputs
+//------------------------------------------------------------------------------
+// FIX PR-1 [EXU-JALR-TRAIN]: Do not train BHT on JALR. JALR has a register-
+// dependent target that BPU cannot predict. Training JALR corrupts BHT entries
+// that may alias with conditional branches at the same index, causing false
+// mispredictions. JALR is identified by jump_req=1 and sum2_op=REG_IMM.
+assign exu2ifu_bpu_train_vld_o   = exu_queue_vd & exu_rdy
+                                  & (exu_queue.branch_req
+                                    | (exu_queue.jump_req
+                                       & (exu_queue.sum2_op != SCR1_SUM2_OP_REG_IMM)));
+assign exu2ifu_bpu_train_pc_o    = pc_curr_ff;
+assign exu2ifu_bpu_train_taken_o = jb_taken;
+
+//------------------------------------------------------------------------------
+// OPTIMIZATION: RAS training outputs (push/pop at commit time)
+//------------------------------------------------------------------------------
+// OPTIMIZATION: RAS push — call instruction detection.
+// Any jump (JAL, JALR, C.JAL, C.JALR) that writes to ra (x1) is a call.
+// IDU decodes all RVC jumps into their 32-bit equivalents, setting rd_addr.
+//   C.JAL  → decoded as JAL with rd=x1  → rd_addr = 1
+//   C.JALR → decoded as JALR with rd=x1 → rd_addr = 1
+//   JAL rd=x1 → rd_addr = 1
+//   JALR rd=x1 → rd_addr = 1
+// Simpler and more correct than checking raw instruction bits.
+logic exu_is_call;
+assign exu_is_call = exu_queue_vd & exu_rdy & exu_queue.jump_req
+                       & (exu_queue.rd_addr == 5'd1);
+
+assign exu2ifu_bpu_ras_push_o      = exu_is_call;
+assign exu2ifu_bpu_ras_push_addr_o = inc_pc;  // PC+2 for RVC, PC+4 for RVI
+
+// OPTIMIZATION: RAS pop — return instruction detection.
+// A return is JALR (or C.JR decoded as JALR) with rs1=ra(x1) and rd=x0.
+// IDU decodes C.JR as JALR with rd=x0, so rd_addr=0 covers both 32-bit and RVC.
+//   JALR rs1=ra rd=x0 → rd_addr=0, rs1_addr=1, sum2_op=REG_IMM
+//   C.JR rs1=ra        → decoded as JALR rd=x0, same field mapping
+logic exu_is_return;
+assign exu_is_return = exu_queue_vd & exu_rdy
+    & exu_queue.jump_req
+    & (exu_queue.sum2_op == SCR1_SUM2_OP_REG_IMM)
+    & (exu_queue.rs1_addr == 5'd1)
+    & (exu_queue.rd_addr == 5'd0);
+
+assign exu2ifu_bpu_ras_is_return_o = exu_is_return;
+`endif // SCR1_BPU_EN
 
 //------------------------------------------------------------------------------
 // Load/Store Unit (LSU)
@@ -820,6 +1009,28 @@ assign exu2pipe_exc_req_o  = exu_queue_vd ? exu_exc_req : exu_exc_req_ff;
 `else // SCR1_DBG_EN
 assign exu2pipe_exc_req_o  = exu_exc_req;
 `endif // SCR1_DBG_EN
+
+// Proposal 3 [EXU-FENCEI-FLUSH]: Assert BPU flush on FENCE.I retirement.
+// FENCE.I requires the instruction cache (and BHT) to be flushed.
+// The flush is asserted one cycle after FENCE.I executes (when it drives
+// exu2ifu_pc_new_req_o), and clears on the next cycle. This ensures
+// the BHT is reset before IFU starts fetching the post-FENCE.I stream.
+`ifdef SCR1_BPU_EN
+logic fencei_flush_ff;
+logic fencei_flush_next;
+always_ff @(posedge clk, negedge rst_n) begin
+    if (~rst_n) begin
+        fencei_flush_ff <= 1'b0;
+    end else begin
+        fencei_flush_ff <= fencei_flush_next;
+    end
+end
+// Set when FENCE.I drives a new PC request; clear next cycle.
+assign fencei_flush_next = (exu_queue_vd & exu_queue.fencei_req) ? 1'b1
+                        : ~fencei_flush_ff            ? 1'b0
+                        : fencei_flush_ff;
+assign exu2ifu_bpu_flush_o = fencei_flush_ff;
+`endif // SCR1_BPU_EN
 
 // Breakpoints
 assign exu2pipe_brkpt_o    = exu_queue_vd & (exu_queue.exc_code == SCR1_EXC_CODE_BREAKPOINT);
@@ -1029,10 +1240,34 @@ assign update_pc_en = (init_pc | exu2pipe_instret_o | exu2csr_take_irq_o)
                     ;
 assign update_pc    = exu2ifu_pc_new_req_o ? exu2ifu_pc_new_o : inc_pc;
 
+// v17 DEBUG: Per-instruction retirement trace (selective)
+`ifdef SCR1_BPU_EN
+always_ff @(posedge clk) begin
+    if (exu_queue_vd & exu_rdy) begin
+        if (exu_queue.branch_req | exu_queue.jump_req) begin
+            $display("[EXU-DBG] BR/JMP: PC=%h branch=%b jump=%b taken=%b cmp=%b bpu_vld=%b bpu_pred=%b mispred=%b newpc=%h newreq=%b rvc=%b bpu_str=%b bpu_targ=%h sum2=%0d rs1=%0d rs2=%0d",
+                pc_curr_ff, exu_queue.branch_req, exu_queue.jump_req, jb_taken, ialu_cmp,
+                exu_bpu_vld_ff, exu_bpu_pred_ff, bpu_mispredict, jb_new_pc, exu2ifu_pc_new_req_o,
+                exu_queue.instr_rvc, exu_bpu_str_ff, exu_bpu_target_ff,
+                exu_queue.instr_rvc, exu_queue.sum2_op, exu_queue.rs1_addr, exu_queue.rs2_addr);
+        end
+    end
+end
+`endif // SCR1_BPU_EN
 
 //------------------------------------------------------------------------------
 // Assertion
 //------------------------------------------------------------------------------
+
+// v17 DEBUG: Enhanced exception trace with instruction context
+always_ff @(posedge clk) begin
+    if (exu_queue_vd & exu_exc_req) begin
+        $display("[EXU-DBG] EXCEPTION: PC=%h code=%0d trap=%h taken=%b rvc=%b jump=%b branch=%b sum2=%0d rs1=%0d rs2=%0d rd=%0d",
+            pc_curr_ff, exc_code, exc_trap_val, jb_taken, exu_queue.instr_rvc,
+            exu_queue.jump_req, exu_queue.branch_req, exu_queue.sum2_op,
+            exu_queue.rs1_addr, exu_queue.rs2_addr, exu_queue.rd_addr);
+    end
+end
 
 // X checks
 

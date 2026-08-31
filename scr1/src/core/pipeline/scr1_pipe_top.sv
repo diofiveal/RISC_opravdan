@@ -140,6 +140,29 @@ logic                                       ifu2idu_imem_err;       // IFU instr
 logic                                       ifu2idu_err_rvi_hi;     // 1 - imem fault when trying to fetch second half of an unaligned RVI instruction
 logic                                       idu2ifu_rdy;            // IDU ready for new data
 
+`ifdef SCR1_BPU_EN
+// BPU signals
+logic                                       ifu2idu_bpu_pred;
+logic                                       ifu2idu_bpu_vld;
+logic [`SCR1_XLEN-1:0]                      ifu2idu_bpu_target;
+logic                                       ifu2idu_bpu_str;
+logic [`SCR1_XLEN-1:0]                      idu2exu_bpu_target;
+logic                                       idu2exu_bpu_str;
+logic                                       idu2exu_bpu_pred;
+logic                                       idu2exu_bpu_vld;
+logic                                       exu2ifu_bpu_train_vld;
+logic [`SCR1_XLEN-1:0]                      exu2ifu_bpu_train_pc;
+logic                                       exu2ifu_bpu_train_taken;
+logic                                       exu2ifu_bpu_flush;       // FENCE.I BHT flush
+// OPTIMIZATION: BPU steer bypass flag (IFU→IDU→EXU path)
+logic                                       ifu2idu_bpu_steer_bypass;
+logic                                       idu2exu_bpu_steer_bypass;
+// OPTIMIZATION: RAS training interface (EXU→IFU→BPU path)
+logic                                       exu2ifu_bpu_ras_push;
+logic [`SCR1_XLEN-1:0]                      exu2ifu_bpu_ras_push_addr;
+logic                                       exu2ifu_bpu_ras_is_return;
+`endif // SCR1_BPU_EN
+
 // IDU <-> EXU
 logic                                       idu2exu_req;            // IDU request
 type_scr1_exu_cmd_s                         idu2exu_cmd;            // IDU command (see scr1_riscv_isa_decoding.svh)
@@ -277,9 +300,8 @@ logic                                       pipe2clkctl_wake_req_o;
 //-------------------------------------------------------------------------------
 assign stop_fetch   = wfi_run2halt
 `ifdef SCR1_DBG_EN
-                    | fetch_pbuf
+                    | fetch_pbuf;
 `endif // SCR1_DBG_EN
-                    ;
 
 `ifdef SCR1_CLKCTRL_EN
 assign pipe2clkctl_sleep_req_o = wfi_halted & ~imem_txns_pending;
@@ -313,6 +335,9 @@ scr1_pipe_ifu i_pipe_ifu (
     .exu2ifu_pc_new_req_i     (new_pc_req         ),
     .exu2ifu_pc_new_i         (new_pc             ),
     .pipe2ifu_stop_fetch_i    (stop_fetch         ),
+`ifdef SCR1_BPU_EN
+    .exu2ifu_bpu_flush_i      (exu2ifu_bpu_flush  ),
+`endif // SCR1_BPU_EN
 
 `ifdef SCR1_DBG_EN
     // IFU <-> HDU Program Buffer interface
@@ -332,6 +357,23 @@ scr1_pipe_ifu i_pipe_ifu (
     .ifu2idu_imem_err_o       (ifu2idu_imem_err   ),
     .ifu2idu_err_rvi_hi_o     (ifu2idu_err_rvi_hi ),
     .ifu2idu_vd_o             (ifu2idu_vd         )
+`ifdef SCR1_BPU_EN
+    ,
+    // BPU interface
+    .ifu2idu_bpu_pred_o       (ifu2idu_bpu_pred       ),
+    .ifu2idu_bpu_vld_o        (ifu2idu_bpu_vld        ),
+    .ifu2idu_bpu_target_o     (ifu2idu_bpu_target     ),
+    .ifu2idu_bpu_str_o        (ifu2idu_bpu_str        ),
+    .exu2ifu_bpu_train_vld_i  (exu2ifu_bpu_train_vld ),
+    .exu2ifu_bpu_train_pc_i   (exu2ifu_bpu_train_pc  ),
+    .exu2ifu_bpu_train_taken_i (exu2ifu_bpu_train_taken),
+// OPTIMIZATION: RAS training ports (EXU→IFU→BPU)
+    .exu2ifu_bpu_ras_push_i      (exu2ifu_bpu_ras_push      ),
+    .exu2ifu_bpu_ras_push_addr_i (exu2ifu_bpu_ras_push_addr ),
+    .exu2ifu_bpu_ras_is_return_i (exu2ifu_bpu_ras_is_return ),
+// OPTIMIZATION: BPU steer bypass output (IFU→IDU)
+    .ifu2idu_bpu_steer_bypass_o (ifu2idu_bpu_steer_bypass )
+`endif // SCR1_BPU_EN
 );
 
 //-------------------------------------------------------------------------------
@@ -347,6 +389,19 @@ scr1_pipe_idu i_pipe_idu (
     .ifu2idu_imem_err_i     (ifu2idu_imem_err  ),
     .ifu2idu_err_rvi_hi_i   (ifu2idu_err_rvi_hi),
     .ifu2idu_vd_i           (ifu2idu_vd        ),
+`ifdef SCR1_BPU_EN
+    .ifu2idu_bpu_pred_i       (ifu2idu_bpu_pred       ),
+    .ifu2idu_bpu_vld_i        (ifu2idu_bpu_vld        ),
+    .ifu2idu_bpu_target_i     (ifu2idu_bpu_target     ),
+    .ifu2idu_bpu_str_i        (ifu2idu_bpu_str        ),
+    .idu2exu_bpu_pred_o       (idu2exu_bpu_pred       ),
+    .idu2exu_bpu_vld_o        (idu2exu_bpu_vld        ),
+    .idu2exu_bpu_target_o     (idu2exu_bpu_target     ),
+    .idu2exu_bpu_str_o        (idu2exu_bpu_str        ),
+// OPTIMIZATION: BPU steer bypass flag (IFU→IDU→EXU)
+    .ifu2idu_bpu_steer_bypass_i (ifu2idu_bpu_steer_bypass),
+    .idu2exu_bpu_steer_bypass_o (idu2exu_bpu_steer_bypass),
+`endif // SCR1_BPU_EN
 
     .idu2exu_req_o          (idu2exu_req       ),
     .idu2exu_cmd_o          (idu2exu_cmd       ),
@@ -469,6 +524,23 @@ scr1_pipe_exu i_pipe_exu (
     .exu2csr_pc_next_o              (next_pc                 ),
     .exu2ifu_pc_new_req_o           (new_pc_req              ),
     .exu2ifu_pc_new_o               (new_pc                  )
+`ifdef SCR1_BPU_EN
+    ,
+    .exu2ifu_bpu_flush_o      (exu2ifu_bpu_flush      ),
+    .idu2exu_bpu_pred_i            (idu2exu_bpu_pred        ),
+    .idu2exu_bpu_vld_i             (idu2exu_bpu_vld         ),
+    .idu2exu_bpu_target_i          (idu2exu_bpu_target      ),
+    .idu2exu_bpu_str_i             (idu2exu_bpu_str         ),
+    .exu2ifu_bpu_train_vld_o       (exu2ifu_bpu_train_vld  ),
+    .exu2ifu_bpu_train_pc_o        (exu2ifu_bpu_train_pc   ),
+    .exu2ifu_bpu_train_taken_o     (exu2ifu_bpu_train_taken),
+// OPTIMIZATION: RAS training outputs (EXU→IFU→BPU)
+    .exu2ifu_bpu_ras_push_o      (exu2ifu_bpu_ras_push      ),
+    .exu2ifu_bpu_ras_push_addr_o (exu2ifu_bpu_ras_push_addr ),
+    .exu2ifu_bpu_ras_is_return_o (exu2ifu_bpu_ras_is_return ),
+// OPTIMIZATION: BPU steer bypass input (IDU→EXU)
+    .idu2exu_bpu_steer_bypass_i (idu2exu_bpu_steer_bypass )
+`endif // SCR1_BPU_EN
 );
 
 //-------------------------------------------------------------------------------

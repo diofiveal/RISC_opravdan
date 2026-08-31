@@ -33,6 +33,24 @@ module scr1_pipe_idu
     input   logic                           ifu2idu_imem_err_i,     // Instruction access fault exception
     input   logic                           ifu2idu_err_rvi_hi_i,   // 1 - imem fault when trying to fetch second half of an unaligned RVI instruction
     input   logic                           ifu2idu_vd_i,           // IFU request
+`ifdef SCR1_BPU_EN
+    input   logic                           ifu2idu_bpu_pred_i,      // BPU predicted taken
+    input   logic                           ifu2idu_bpu_vld_i,       // BPU prediction valid
+    input   logic [`SCR1_XLEN-1:0]          ifu2idu_bpu_target_i,    // v20: BPU predicted target
+    input   logic                           ifu2idu_bpu_str_i,       // v20: slot was BPU-steered
+    // OPTIMIZATION: BPU steer bypass flag for conditional FIX #4 in EXU
+    input   logic                           ifu2idu_bpu_steer_bypass_i,// Bypassed & BPU steered
+    output  logic                           idu2exu_bpu_pred_o,      // BPU predicted taken (to EXU)
+    output  logic                           idu2exu_bpu_vld_o,       // BPU prediction valid (to EXU)
+// v21 FIX [IDU-TARGET-WIDTH]: this output was declared 1 bit wide, truncating
+// the 32-bit predicted target to its LSB (always 0 for aligned targets).
+// EXU then never matched (predicted_target == resolved_target) and the
+// flush-skip for correctly predicted taken branches never fired.
+    output  logic [`SCR1_XLEN-1:0]          idu2exu_bpu_target_o,    // v20: BPU predicted target (to EXU)
+    output  logic                           idu2exu_bpu_str_o,       // v20: slot was BPU-steered (to EXU)
+    // OPTIMIZATION: Pass through steer bypass flag
+    output  logic                           idu2exu_bpu_steer_bypass_o, // Bypassed & BPU steered (to EXU)
+`endif // SCR1_BPU_EN
 
     // IDU <-> EXU interface
     output  logic                           idu2exu_req_o,          // IDU request
@@ -80,6 +98,16 @@ logic                               rve_illegal;
 assign idu2ifu_rdy_o  = exu2idu_rdy_i;
 assign idu2exu_req_o  = ifu2idu_vd_i;
 assign instr          = ifu2idu_instr_i;
+
+`ifdef SCR1_BPU_EN
+// BPU prediction pass-through (IDU does not process BPU signals)
+assign idu2exu_bpu_pred_o = ifu2idu_bpu_pred_i;
+assign idu2exu_bpu_vld_o  = ifu2idu_bpu_vld_i;
+assign idu2exu_bpu_target_o = ifu2idu_bpu_target_i;
+assign idu2exu_bpu_str_o  = ifu2idu_bpu_str_i;
+// OPTIMIZATION: Pass through steer bypass flag (IFU→EXU)
+assign idu2exu_bpu_steer_bypass_o = ifu2idu_bpu_steer_bypass_i;
+`endif // SCR1_BPU_EN
 
 // RVI / RVC
 assign instr_type   = type_scr1_instr_type_e'(instr[1:0]);

@@ -6,6 +6,33 @@
 `ifndef SCR1_ARCH_DESCRIPTION_SVH
 `define SCR1_ARCH_DESCRIPTION_SVH
 
+/// ============================================================================
+/// v21 TARGET CONFIGURATION (READ THIS FIRST)
+///
+/// ALL v21 BPU optimization work is validated on and targets the
+/// SCR1_CFG_RV32IMC_MAX configuration (4-stage pipeline):
+///     - ISA:              RV32IMC, machine mode only
+///     - Pipeline:         4 stages (FE / DEC / EXE / MEM-WB), DEC stage present
+///                         (SCR1_NO_DEC_STAGE and SCR1_NO_EXE_STAGE are NOT set)
+///     - SoC top:          AXI (nexys4ddr_scr1) or AHB (scr1_top_ahb)
+///     - TCM:              0xF0000000
+///     - Reset vector:     0xFFFFFF00
+///     - Timer:            0xF0040000
+///     - IPIC / VIRQ / TDU / DBG: enabled
+///
+/// Standalone builds (SCR1_ARCH_CUSTOM not defined) default to RV32IMC_MAX.
+/// In the SCR1-SDK flow (SCR1_ARCH_CUSTOM defined) the configuration and the
+/// address map (TCM 0xF0000000, reset 0xFFFFFF00, timer 0xF0040000) are
+/// selected EXCLUSIVELY by scr1_arch_custom.svh - the define below is gated
+/// off to avoid duplicate configuration/parameter declarations.
+///
+/// Measured on RV32IMC_MAX (Verilator, this delivery):
+///     branch prediction coverage  : 100.00% (test1), 99.37% (matmul)
+///     branch prediction accuracy  : 99.02% (test1), 91.12% (matmul)
+///     cycles vs BPU-off baseline  : -39.09% (test1), -10.73% (test2),
+///                                   -5.23% (matmul)
+/// ============================================================================
+
 
 //------------------------------------------------------------------------------
 // CORE FUNDAMENTAL PARAMETERS
@@ -59,7 +86,9 @@
 
 // Uncomment one of these defines to set the recommended configuration:
 
-//`define SCR1_CFG_RV32IMC_MAX
+`ifndef SCR1_ARCH_CUSTOM
+`define SCR1_CFG_RV32IMC_MAX
+`endif // ~SCR1_ARCH_CUSTOM
 //`define SCR1_CFG_RV32IC_BASE
 //`define SCR1_CFG_RV32EC_MIN
 
@@ -154,6 +183,9 @@ parameter int unsigned SCR1_TDU_TRIG_NUM = 2;   // number of hardware triggers
 //------------------------------------------------------------------------------
 // CORE INTEGRATION OPTIONS
 //------------------------------------------------------------------------------
+
+// Branch Prediction Unit
+`define SCR1_BPU_EN                  // enable BHT-based Branch Prediction Unit
 
 // Bypasses on AXI/AHB bridge I/O
 `define SCR1_IMEM_AHB_IN_BP         // bypass instruction memory AHB bridge input register
