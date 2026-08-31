@@ -1771,52 +1771,6 @@ end
 `endif
 `endif
 
-
-// DBG_BPU_EARLY_FOCUS_EXU
-`ifdef SCR1_TRGT_SIMULATION
-`ifdef SCR1_BPU_EN
-`ifdef SCR1_EARLY_BRANCH
-integer dbg_focus_exu_cnt;
-always_ff @(posedge clk, negedge rst_n) begin
-    if (~rst_n) begin
-        dbg_focus_exu_cnt <= 0;
-    end else if (dbg_focus_exu_cnt < 2000
-                 && exu_queue_vd
-                 && (exu_queue.branch_req | exu_queue.jump_req)
-                 && (
-                      early_branch_mispredict
-                      || branch_redirect_req
-                      || exu_bpu_vld_ff
-                    )) begin
-        $display("[FOCUS-EXU] pc=%08h br=%0b jump=%0b pred_v=%0b pred=%0b early_v=%0b early=%0b actual=%0b miss=%0b redir=%0b order_block=%0b new_req=%0b new_pc=%08h jb_pc=%08h inc_pc=%08h rs1=%08h rs2=%08h",
-                 pc_curr_ff,
-                 exu_queue.branch_req,
-                 exu_queue.jump_req,
-                 exu_bpu_vld_ff,
-                 exu_bpu_pred_ff,
-                 exu_queue.early_branch_valid,
-                 exu_queue.early_branch_taken,
-                 branch_taken,
-                 early_branch_mispredict,
-                 branch_redirect_req,
-`ifdef SCR1_MEM_STAGE_EN
-                 exu_order_block,
-`else
-                 1'b0,
-`endif
-                 exu2ifu_pc_new_req_o,
-                 exu2ifu_pc_new_o,
-                 jb_new_pc,
-                 inc_pc,
-                 mprf2exu_rs1_data_i,
-                 mprf2exu_rs2_data_i);
-        dbg_focus_exu_cnt <= dbg_focus_exu_cnt + 1;
-    end
-end
-`endif
-`endif
-`endif
-
 `ifdef SCR1_TRGT_SIMULATION
 //------------------------------------------------------------------------------
 // Tracelog signals

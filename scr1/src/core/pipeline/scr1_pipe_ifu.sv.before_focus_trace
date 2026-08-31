@@ -239,11 +239,6 @@ logic                               bpu_steer;
 logic                               bpu_pred_is_hi;
 logic                               bpu_pred_instr_complete;
 logic                               bpu_can_steer;
-
-// PC of the 32-bit IMEM word whose response is being decoded now.
-// imem_addr_ff may already point to a newer accepted request.
-logic [`SCR1_XLEN-1:0]              bpu_resp_word_pc;
-
 logic                               q_bpu_pred [SCR1_IFU_Q_SIZE_HALF];
 logic                               q_bpu_vld  [SCR1_IFU_Q_SIZE_HALF];
 
@@ -587,22 +582,10 @@ assign bpu_can_steer = imem_resp_vd & bpu_pred_instr_complete
                      ;
 assign bpu_steer = bpu_predict_taken & bpu_can_steer;
 
-
-// imem_addr_ff advances on request acknowledgement. If one or more valid
-// requests are outstanding, the response returning now belongs to an older
-// address. Each outstanding IMEM word advances the address by 4 bytes.
-assign bpu_resp_word_pc =
-       {imem_addr_ff, 2'b00}
-     - ({{(`SCR1_XLEN-SCR1_TXN_CNT_W){1'b0}},
-         imem_vd_pnd_txns_cnt} << 2);
-
 scr1_pipe_bpu i_pipe_bpu (
     .clk                       (clk),
     .rst_n                     (rst_n),
-    .bpu_pred_pc_i               (
-        bpu_resp_word_pc
-        + {{(`SCR1_XLEN-2){1'b0}}, bpu_pred_is_hi, 1'b0}
-    ),
+    .bpu_pred_pc_i             ({imem_addr_ff, 2'b00} + {bpu_pred_is_hi, 1'b0}),
     .bpu_pred_instr_i          (bpu_pred_is_hi ? {imem2ifu_rdata_i[15:0], imem2ifu_rdata_i[31:16]} : imem2ifu_rdata_i),
     .bpu_pred_vld_i            (bpu_can_steer),
     .bpu_pred_is_hi_i          (bpu_pred_is_hi),
@@ -1098,42 +1081,6 @@ always_ff @(posedge clk, negedge rst_n) begin
             $display("[DBG-IFU-KILL] t=%0t q_r=%0d q_w=%0d head=%04h",
                      $time, q_rptr, q_wptr, q_data_head);
             dbg_bpu_early_ifu_cnt <= dbg_bpu_early_ifu_cnt + 1;
-        end
-    end
-end
-`endif
-`endif
-`endif
-
-
-// DBG_BPU_EARLY_FOCUS_IFU
-`ifdef SCR1_TRGT_SIMULATION
-`ifdef SCR1_BPU_EN
-`ifdef SCR1_EARLY_BRANCH
-integer dbg_focus_ifu_cnt;
-always_ff @(posedge clk, negedge rst_n) begin
-    if (~rst_n) begin
-        dbg_focus_ifu_cnt <= 0;
-    end else if (dbg_focus_ifu_cnt < 2000) begin
-        if (bpu_steer) begin
-            $display("[FOCUS-BPU] pc=%08h target=%08h instr=%08h pred_v=%0b pred=%0b is_hi=%0b",
-                     ({imem_addr_ff, 2'b00} + {bpu_pred_is_hi, 1'b0}),
-                     bpu_target,
-                     (bpu_pred_is_hi
-                        ? {imem2ifu_rdata_i[15:0], imem2ifu_rdata_i[31:16]}
-                        : imem2ifu_rdata_i),
-                     bpu_pred_vld,
-                     bpu_predict_taken,
-                     bpu_pred_is_hi);
-            dbg_focus_ifu_cnt <= dbg_focus_ifu_cnt + 1;
-        end
-
-        // Only EXU-originated redirects: IDU redirects happen on every iteration
-        // of some loops and would flood the trace.
-        if (exu2ifu_pc_new_req_i) begin
-            $display("[FOCUS-IFU-EXU-REDIR] new_pc=%08h idu_pc=%08h instr=%08h",
-                     exu2ifu_pc_new_i, ifu_idu_pc_ff, ifu2idu_instr_o);
-            dbg_focus_ifu_cnt <= dbg_focus_ifu_cnt + 1;
         end
     end
 end

@@ -1091,39 +1091,6 @@ end
 `endif
 `endif
 
-
-// DBG_BPU_EARLY_FOCUS_IDU
-`ifdef SCR1_TRGT_SIMULATION
-`ifdef SCR1_BPU_EN
-`ifdef SCR1_EARLY_BRANCH
-integer dbg_focus_idu_cnt;
-always_ff @(posedge clk, negedge rst_n) begin
-    if (~rst_n) begin
-        dbg_focus_idu_cnt <= 0;
-    end else if (dbg_focus_idu_cnt < 2000
-                 && idu_accept
-                 && idu2exu_cmd_o.branch_req
-                 && (
-                      ifu2idu_bpu_vld_i
-                      || (mprf2idu_rs1_data_i == mprf2idu_rs2_data_i)
-                    )) begin
-        $display("[FOCUS-IDU] pc=%08h instr=%08h pred_v=%0b pred=%0b early=%0b corr=%0b corr_pc=%08h rs1=%08h rs2=%08h",
-                 ifu2idu_pc_i,
-                 ifu2idu_instr_i,
-                 ifu2idu_bpu_vld_i,
-                 ifu2idu_bpu_pred_i,
-                 idu2exu_cmd_o.early_branch_taken,
-                 branch_req_early,
-                 branch_target_early,
-                 mprf2idu_rs1_data_i,
-                 mprf2idu_rs2_data_i);
-        dbg_focus_idu_cnt <= dbg_focus_idu_cnt + 1;
-    end
-end
-`endif
-`endif
-`endif
-
 `ifdef SCR1_TRGT_SIMULATION
 //-------------------------------------------------------------------------------
 // Assertion

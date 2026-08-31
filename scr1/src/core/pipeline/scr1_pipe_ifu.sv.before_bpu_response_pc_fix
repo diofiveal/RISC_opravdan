@@ -239,11 +239,6 @@ logic                               bpu_steer;
 logic                               bpu_pred_is_hi;
 logic                               bpu_pred_instr_complete;
 logic                               bpu_can_steer;
-
-// PC of the 32-bit IMEM word whose response is being decoded now.
-// imem_addr_ff may already point to a newer accepted request.
-logic [`SCR1_XLEN-1:0]              bpu_resp_word_pc;
-
 logic                               q_bpu_pred [SCR1_IFU_Q_SIZE_HALF];
 logic                               q_bpu_vld  [SCR1_IFU_Q_SIZE_HALF];
 
@@ -587,22 +582,10 @@ assign bpu_can_steer = imem_resp_vd & bpu_pred_instr_complete
                      ;
 assign bpu_steer = bpu_predict_taken & bpu_can_steer;
 
-
-// imem_addr_ff advances on request acknowledgement. If one or more valid
-// requests are outstanding, the response returning now belongs to an older
-// address. Each outstanding IMEM word advances the address by 4 bytes.
-assign bpu_resp_word_pc =
-       {imem_addr_ff, 2'b00}
-     - ({{(`SCR1_XLEN-SCR1_TXN_CNT_W){1'b0}},
-         imem_vd_pnd_txns_cnt} << 2);
-
 scr1_pipe_bpu i_pipe_bpu (
     .clk                       (clk),
     .rst_n                     (rst_n),
-    .bpu_pred_pc_i               (
-        bpu_resp_word_pc
-        + {{(`SCR1_XLEN-2){1'b0}}, bpu_pred_is_hi, 1'b0}
-    ),
+    .bpu_pred_pc_i             ({imem_addr_ff, 2'b00} + {bpu_pred_is_hi, 1'b0}),
     .bpu_pred_instr_i          (bpu_pred_is_hi ? {imem2ifu_rdata_i[15:0], imem2ifu_rdata_i[31:16]} : imem2ifu_rdata_i),
     .bpu_pred_vld_i            (bpu_can_steer),
     .bpu_pred_is_hi_i          (bpu_pred_is_hi),
