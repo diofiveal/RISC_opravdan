@@ -342,7 +342,7 @@ logic [`SCR1_XLEN-1:0]      ifu_pc_new;
 
 `ifdef SCR1_EARLY_BRANCH
 assign ifu_pc_new_req = new_pc_req | idu2ifu_branch_req;
-assign ifu_pc_new     = new_pc_req ? new_pc : idu2ifu_branch_target;
+assign ifu_pc_new = new_pc_req ? new_pc : idu2ifu_branch_target;
 `else
 assign ifu_pc_new_req = new_pc_req;
 assign ifu_pc_new     = new_pc;
