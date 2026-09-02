@@ -13,7 +13,18 @@
  `define SCR1_IMEM_ROUTER_EN
 `endif // SCR1_TCM_EN
 
-module scr1_top_axi (
+module scr1_top_axi #(
+    parameter int unsigned SCR1_ICACHE_LINE_BYTES = 8,
+    parameter int unsigned SCR1_DCACHE_LINE_BYTES = 8,
+    parameter bit SCR1_ICACHE_AXI_BURST_ENABLE = 1'b1,
+    parameter bit SCR1_DCACHE_AXI_BURST_ENABLE = 1'b1,
+    parameter int unsigned SCR1_AXI_MAX_READ_BURST_BEATS = 8,
+`ifdef SCR1_DCACHE_VICTIM_EN
+    parameter int unsigned SCR1_DCACHE_VICTIM_LINES = 4,
+`endif
+    // 1: no-write-allocate on cacheable STORE miss; 0: legacy write-allocate.
+    parameter bit SCR1_DCACHE_NO_WRITE_ALLOCATE = 1'b1
+) (
     // Control
     input   logic                                   pwrup_rst_n,            // Power-Up Reset
     input   logic                                   rst_n,                  // Regular Reset signal
@@ -190,7 +201,11 @@ type_scr1_mem_cmd_e                                 axi_imem_cmd;
 logic [`SCR1_IMEM_AWIDTH-1:0]                       axi_imem_addr;
 logic [`SCR1_IMEM_DWIDTH-1:0]                       axi_imem_rdata;
 type_scr1_mem_resp_e                                axi_imem_resp;
-
+logic [7:0]                                         axi_imem_burst_len;
+logic                                               axi_imem_rvalid;
+logic                                               axi_imem_rlast;
+logic [`SCR1_IMEM_DWIDTH-1:0]                       axi_imem_beat_rdata;
+type_scr1_mem_resp_e                                axi_imem_beat_resp;
 // Instruction cache interface to IMEM router
 logic                                               icache_imem_req_ack;
 logic                                               icache_imem_req;
@@ -208,6 +223,11 @@ logic [`SCR1_DMEM_AWIDTH-1:0]                       axi_dmem_addr;
 logic [`SCR1_DMEM_DWIDTH-1:0]                       axi_dmem_wdata;
 logic [`SCR1_DMEM_DWIDTH-1:0]                       axi_dmem_rdata;
 type_scr1_mem_resp_e                                axi_dmem_resp;
+logic [7:0]                                         axi_dmem_burst_len;
+logic                                               axi_dmem_rvalid;
+logic                                               axi_dmem_rlast;
+logic [`SCR1_DMEM_DWIDTH-1:0]                       axi_dmem_beat_rdata;
+type_scr1_mem_resp_e                                axi_dmem_beat_resp;
 
 // Dcache interface to DMEM router
 logic                                               dcache_dmem_req_ack;
@@ -218,6 +238,10 @@ logic [`SCR1_DMEM_AWIDTH-1:0]                       dcache_dmem_addr;
 logic [`SCR1_DMEM_DWIDTH-1:0]                       dcache_dmem_wdata;
 logic [`SCR1_DMEM_DWIDTH-1:0]                       dcache_dmem_rdata;
 type_scr1_mem_resp_e                                dcache_dmem_resp;
+
+// Four cacheable stores can retire ahead of the external memory response.
+// Keep the depth explicit at the SoC top so FPGA builds have one clear knob.
+localparam int unsigned SCR1_DCACHE_WRITE_BUFFER_DEPTH = 4;
 `ifdef SCR1_TCM_EN
 // Instruction memory interface from router to TCM
 logic                                               tcm_imem_req_ack;
@@ -255,52 +279,70 @@ logic                                               axi_reinit;
 logic                                               axi_imem_idle;
 logic                                               axi_dmem_idle;
 
-`ifdef SCR1_IMEM_REQ_BUF
+// Cache-controller events. These are simple observation nets; all counters and
+// cross-hierarchy simulation signals are guarded by SCR1_TRGT_SIMULATION.
+`ifdef SCR1_IMEM_ROUTER_EN
+logic ic_perf_req_accept;
+logic ic_perf_lookup_event;
+logic ic_perf_lookup_hit;
+logic ic_perf_refill_word;
+logic ic_perf_refill_burst;
+logic ic_perf_burst_error;
+logic ic_perf_victim_word_hit;
+logic ic_perf_victim_swap;
+`endif // SCR1_IMEM_ROUTER_EN
 
-// Buffered interface from core to IMEM router
-logic                           router_imem_req_ack;
-logic                           router_imem_req;
-type_scr1_mem_cmd_e             router_imem_cmd;
-logic [`SCR1_IMEM_AWIDTH-1:0]   router_imem_addr;
+logic dc_perf_req_accept;
+logic dc_perf_lookup_event;
+logic dc_perf_lookup_hit;
+logic dc_perf_req_is_store;
+logic dc_perf_refill_word;
+logic dc_perf_refill_burst;
+logic dc_perf_burst_error;
+logic dc_perf_victim_word_hit;
+logic dc_perf_victim_swap;
+logic dc_perf_victim_store_invalidate;
 
-// 2-entry IMEM request FIFO
-logic [`SCR1_IMEM_AWIDTH-1:0]   imem_req_addr_ff [0:1];
-type_scr1_mem_cmd_e             imem_req_cmd_ff  [0:1];
+`ifdef SCR1_TRGT_SIMULATION
+logic dc_response_completed;
 
-logic                           imem_req_wr_ptr_ff;
-logic                           imem_req_rd_ptr_ff;
-logic [1:0]                     imem_req_cnt_ff;
+assign dc_response_completed =
+    (dcache_dmem_resp == SCR1_MEM_RESP_RDY_OK) ||
+    (dcache_dmem_resp == SCR1_MEM_RESP_RDY_ER);
 
-logic                           imem_req_push;
-logic                           imem_req_pop;
-logic                           imem_req_fifo_empty;
-logic                           imem_req_fifo_full;
+logic perf_retired_event;
 
-`elsif SCR1_IMEM_ACK_REG
-
-// Raw interface between core side and IMEM router
-logic                           router_imem_req;
-logic                           router_imem_req_ack_raw;
-logic [`SCR1_IMEM_AWIDTH-1:0]   imem_accepted_addr_ff;
-
-// Registered acknowledgement returned to the core
-logic                           imem_req_ack_ff;
-
-`elsif SCR1_IMEM_SKID_BUF
-
-logic                           router_imem_req_ack_raw;
-logic                           router_imem_req;
-type_scr1_mem_cmd_e             router_imem_cmd;
-logic [`SCR1_IMEM_AWIDTH-1:0]   router_imem_addr;
-
-logic                           imem_skid_vd_ff;
-type_scr1_mem_cmd_e             imem_skid_cmd_ff;
-logic [`SCR1_IMEM_AWIDTH-1:0]   imem_skid_addr_ff;
-
-logic                           imem_skid_capture;
-logic                           imem_skid_pop;
-
+`ifndef SCR1_CSR_REDUCED_CNT
+assign perf_retired_event =
+    i_core_top.i_pipe_top.instret_nexc;
+`else
+assign perf_retired_event =
+    i_core_top.i_pipe_top.instret;
 `endif
+
+logic dc_memory_stall;
+
+assign dc_memory_stall =
+    i_core_top.i_pipe_top.exu_busy &&
+    i_core_top.i_pipe_top.i_pipe_exu.lsu_req;
+
+`ifdef SCR1_IMEM_ROUTER_EN
+logic ic_response_completed;
+logic ic_memory_stall;
+
+assign ic_response_completed =
+    (icache_imem_resp == SCR1_MEM_RESP_RDY_OK) ||
+    (icache_imem_resp == SCR1_MEM_RESP_RDY_ER);
+
+assign ic_memory_stall =
+    i_core_top.i_pipe_top.idu2ifu_rdy &&
+   !i_core_top.i_pipe_top.ifu2idu_vd &&
+   (
+       (|i_core_top.i_pipe_top.i_pipe_ifu.imem_pnd_txns_cnt) ||
+       (core_imem_req && !core_imem_req_ack)
+   );
+`endif // SCR1_IMEM_ROUTER_EN
+`endif // SCR1_TRGT_SIMULATION
 
 //-------------------------------------------------------------------------------
 // Reset logic
@@ -482,208 +524,20 @@ scr1_timer i_timer (
 //-------------------------------------------------------------------------------
 // Instruction memory router
 //-------------------------------------------------------------------------------
-`ifdef SCR1_IMEM_REQ_BUF
-
-assign imem_req_fifo_empty = (imem_req_cnt_ff == 2'd0);
-assign imem_req_fifo_full  = (imem_req_cnt_ff == 2'd2);
-
-// Core считает запрос принятым, как только он помещён в FIFO.
-// Здесь больше нет зависимости от ACK кэша.
-assign core_imem_req_ack = ~imem_req_fifo_full;
-
-assign imem_req_push =
-       core_imem_req
-     & core_imem_req_ack;
-
-// Router видит только зарегистрированный head FIFO
-assign router_imem_req  = ~imem_req_fifo_empty;
-assign router_imem_cmd  = imem_req_cmd_ff [imem_req_rd_ptr_ff];
-assign router_imem_addr = imem_req_addr_ff[imem_req_rd_ptr_ff];
-
-assign imem_req_pop =
-       router_imem_req
-     & router_imem_req_ack;
-
-
-// Write pointer + request data
-always_ff @(posedge clk, negedge core_rst_n_local) begin
-    if (~core_rst_n_local) begin
-        imem_req_wr_ptr_ff <= 1'b0;
-    end else if (imem_req_push) begin
-        imem_req_addr_ff[imem_req_wr_ptr_ff] <= core_imem_addr;
-        imem_req_cmd_ff [imem_req_wr_ptr_ff] <= core_imem_cmd;
-        imem_req_wr_ptr_ff <= ~imem_req_wr_ptr_ff;
-    end
-end
-
-
-// Read pointer
-always_ff @(posedge clk, negedge core_rst_n_local) begin
-    if (~core_rst_n_local) begin
-        imem_req_rd_ptr_ff <= 1'b0;
-    end else if (imem_req_pop) begin
-        imem_req_rd_ptr_ff <= ~imem_req_rd_ptr_ff;
-    end
-end
-
-
-// Number of buffered requests
-always_ff @(posedge clk, negedge core_rst_n_local) begin
-    if (~core_rst_n_local) begin
-        imem_req_cnt_ff <= 2'd0;
-    end else begin
-        case ({imem_req_push, imem_req_pop})
-            2'b10:   imem_req_cnt_ff <= imem_req_cnt_ff + 1'b1;
-            2'b01:   imem_req_cnt_ff <= imem_req_cnt_ff - 1'b1;
-            default: imem_req_cnt_ff <= imem_req_cnt_ff;
-        endcase
-    end
-end
-
-`elsif SCR1_IMEM_ACK_REG
-
-// The core sees only the registered acknowledge.
-assign core_imem_req_ack = imem_req_ack_ff;
-
-// While ACK is being delivered to the core, do not send
-// the same request to the router for the second time.
-assign router_imem_req =
-       core_imem_req
-     & ~(imem_req_ack_ff
-         & (core_imem_addr == imem_accepted_addr_ff));
-
-
-// Register raw IMEM-router acknowledgement.
-always_ff @(posedge clk, negedge core_rst_n_local) begin
-    if (~core_rst_n_local) begin
-        imem_req_ack_ff       <= 1'b0;
-        imem_accepted_addr_ff <= '0;
-    end else begin
-        if (imem_req_ack_ff) begin
-            imem_req_ack_ff <= 1'b0;
-        end
-
-        if (router_imem_req & router_imem_req_ack_raw) begin
-            imem_req_ack_ff       <= 1'b1;
-            imem_accepted_addr_ff <= core_imem_addr;
-        end
-    end
-end
-
-`elsif SCR1_IMEM_SKID_BUF
-
-// ------------------------------------------------------------
-// 1-entry fall-through IMEM request buffer
-// ------------------------------------------------------------
-
-// IFU talks only to local registered state.
-// No combinational cache/router ACK path back to the core.
-assign core_imem_req_ack = ~imem_skid_vd_ff;
-
-
-// If the buffer is empty, request falls through directly
-// from IFU to the IMEM router.
-//
-// If the buffer contains a stalled request, the buffered
-// request owns the router interface.
-assign router_imem_req =
-       imem_skid_vd_ff
-     ? 1'b1
-     : core_imem_req;
-
-assign router_imem_cmd =
-       imem_skid_vd_ff
-     ? imem_skid_cmd_ff
-     : core_imem_cmd;
-
-assign router_imem_addr =
-       imem_skid_vd_ff
-     ? imem_skid_addr_ff
-     : core_imem_addr;
-
-
-// Empty buffer + core request + downstream did not accept:
-// core already saw ACK from the local buffer, therefore
-// we must save the request.
-assign imem_skid_capture =
-       ~imem_skid_vd_ff
-     & core_imem_req
-     & ~router_imem_req_ack_raw;
-
-
-// Buffered request was finally accepted by router/cache.
-assign imem_skid_pop =
-       imem_skid_vd_ff
-     & router_imem_req_ack_raw;
-
-
-// Buffer storage
-always_ff @(posedge clk, negedge core_rst_n_local) begin
-    if (~core_rst_n_local) begin
-        imem_skid_vd_ff   <= 1'b0;
-        imem_skid_cmd_ff  <= SCR1_MEM_CMD_RD;
-        imem_skid_addr_ff <= '0;
-    end else begin
-
-        if (imem_skid_pop) begin
-            imem_skid_vd_ff <= 1'b0;
-        end
-
-        if (imem_skid_capture) begin
-            imem_skid_vd_ff   <= 1'b1;
-            imem_skid_cmd_ff  <= core_imem_cmd;
-            imem_skid_addr_ff <= core_imem_addr;
-        end
-
-    end
-end
-
-`endif
-
 scr1_imem_router #(
-    .SCR1_ADDR_MASK     (SCR1_TCM_ADDR_MASK),
-    .SCR1_ADDR_PATTERN  (SCR1_TCM_ADDR_PATTERN)
-)
-
-
-i_imem_router (
+    .SCR1_ADDR_MASK             (SCR1_TCM_ADDR_MASK),
+    .SCR1_ADDR_PATTERN          (SCR1_TCM_ADDR_PATTERN)
+) i_imem_router (
     .rst_n          (core_rst_n_local ),
     .clk            (clk              ),
 
-
-    // Interface to core / request buffer
-// Interface to core
-`ifdef SCR1_IMEM_REQ_BUF
-
-    .imem_req_ack   (router_imem_req_ack),
-    .imem_req       (router_imem_req),
-    .imem_cmd       (router_imem_cmd),
-    .imem_addr      (router_imem_addr),
-
-`elsif SCR1_IMEM_ACK_REG
-
-    .imem_req_ack   (router_imem_req_ack_raw),
-    .imem_req       (router_imem_req),
-    .imem_cmd       (core_imem_cmd),
-    .imem_addr      (core_imem_addr),
-
-`elsif SCR1_IMEM_SKID_BUF
-
-    .imem_req_ack   (router_imem_req_ack_raw),
-    .imem_req       (router_imem_req),
-    .imem_cmd       (router_imem_cmd),
-    .imem_addr      (router_imem_addr),
-
-`else
-
+    // Interface to core
     .imem_req_ack   (core_imem_req_ack),
-    .imem_req       (core_imem_req),
-    .imem_cmd       (core_imem_cmd),
-    .imem_addr      (core_imem_addr),
-
-`endif
-    .imem_rdata     (core_imem_rdata    ),
-    .imem_resp      (core_imem_resp     ),
+    .imem_req       (core_imem_req    ),
+    .imem_cmd       (core_imem_cmd    ),
+    .imem_addr      (core_imem_addr   ),
+    .imem_rdata     (core_imem_rdata  ),
+    .imem_resp      (core_imem_resp   ),
 
     // Interface to AXI bridge
     .port0_req_ack  (icache_imem_req_ack),
@@ -707,7 +561,11 @@ i_imem_router (
     .port1_rdata    (tcm_imem_rdata   ),
     .port1_resp     (tcm_imem_resp    )
 );
-scr1_icache i_icache (
+scr1_icache #(
+    .ICACHE_LINE_BYTES            (SCR1_ICACHE_LINE_BYTES),
+    .ICACHE_AXI_BURST_ENABLE      (SCR1_ICACHE_AXI_BURST_ENABLE),
+    .ICACHE_MAX_READ_BURST_BEATS  (SCR1_AXI_MAX_READ_BURST_BEATS)
+) i_icache (
     .clk                 (clk),
     .rst_n               (core_rst_n_local),
 
@@ -724,8 +582,21 @@ scr1_icache i_icache (
     .memory_req_o        (axi_imem_req),
     .memory_cmd_o        (axi_imem_cmd),
     .memory_addr_o       (axi_imem_addr),
-    .memory_rdata_i      (axi_imem_rdata),
-    .memory_resp_i       (axi_imem_resp)
+    .memory_burst_len_o  (axi_imem_burst_len),
+    .memory_rvalid_i     (axi_imem_rvalid),
+    .memory_rlast_i      (axi_imem_rlast),
+    .memory_rdata_i      (axi_imem_beat_rdata),
+    .memory_resp_i       (axi_imem_beat_resp),
+
+
+    .perf_req_accept        (ic_perf_req_accept),
+    .perf_lookup_event      (ic_perf_lookup_event),
+    .perf_lookup_hit        (ic_perf_lookup_hit),
+    .perf_refill_word       (ic_perf_refill_word),
+    .perf_refill_burst      (ic_perf_refill_burst),
+    .perf_burst_error       (ic_perf_burst_error),
+    .perf_victim_word_hit   (ic_perf_victim_word_hit),
+    .perf_victim_swap       (ic_perf_victim_swap)
 );
 
 `else // SCR1_IMEM_ROUTER_EN
@@ -733,6 +604,7 @@ scr1_icache i_icache (
 assign axi_imem_req         = core_imem_req;
 assign axi_imem_cmd         = core_imem_cmd;
 assign axi_imem_addr        = core_imem_addr;
+assign axi_imem_burst_len   = 8'd0;
 assign core_imem_req_ack    = axi_imem_req_ack;
 assign core_imem_resp       = axi_imem_resp;
 assign core_imem_rdata      = axi_imem_rdata;
@@ -820,7 +692,16 @@ scr1_dmem_router #(
     .port0_rdata    (dcache_dmem_rdata),
     .port0_resp     (dcache_dmem_resp)
 );
-scr1_dcache i_dcache (
+scr1_dcache #(
+    .DCACHE_LINE_BYTES         (SCR1_DCACHE_LINE_BYTES),
+    .DCACHE_WRITE_BUFFER_DEPTH (SCR1_DCACHE_WRITE_BUFFER_DEPTH),
+    .DCACHE_NO_WRITE_ALLOCATE  (SCR1_DCACHE_NO_WRITE_ALLOCATE),
+    .DCACHE_AXI_BURST_ENABLE   (SCR1_DCACHE_AXI_BURST_ENABLE),
+`ifdef SCR1_DCACHE_VICTIM_EN
+    .DCACHE_VICTIM_LINES       (SCR1_DCACHE_VICTIM_LINES),
+`endif
+    .DCACHE_MAX_READ_BURST_BEATS (SCR1_AXI_MAX_READ_BURST_BEATS)
+) i_dcache (
     .clk                (clk),
     .rst_n              (core_rst_n_local),
 
@@ -840,9 +721,25 @@ scr1_dcache i_dcache (
     .memory_width_o     (axi_dmem_width),
     .memory_addr_o      (axi_dmem_addr),
     .memory_wdata_o     (axi_dmem_wdata),
+    .memory_burst_len_o (axi_dmem_burst_len),
     .memory_req_ack_i   (axi_dmem_req_ack),
-    .memory_rdata_i     (axi_dmem_rdata),
-    .memory_resp_i      (axi_dmem_resp)
+    .memory_rvalid_i    (axi_dmem_rvalid),
+    .memory_rlast_i     (axi_dmem_rlast),
+    .memory_rdata_i     (axi_dmem_beat_rdata),
+    .memory_resp_i      (axi_dmem_beat_resp),
+
+    .perf_req_accept    (dc_perf_req_accept),
+    .perf_lookup_event  (dc_perf_lookup_event),
+    .perf_lookup_hit    (dc_perf_lookup_hit),
+    .perf_req_is_store  (dc_perf_req_is_store),
+    .perf_refill_word   (dc_perf_refill_word),
+    .perf_refill_burst  (dc_perf_refill_burst),
+    .perf_burst_error   (dc_perf_burst_error),
+    .perf_victim_word_hit
+                         (dc_perf_victim_word_hit),
+    .perf_victim_swap   (dc_perf_victim_swap),
+    .perf_victim_store_invalidate
+                         (dc_perf_victim_store_invalidate)
 );
 
 
@@ -856,10 +753,12 @@ scr1_mem_axi #(
     .SCR1_AXI_REQ_BP    (0),
 `endif // SCR1_IMEM_AXI_REQ_BP
 `ifdef SCR1_IMEM_AXI_RESP_BP
-    .SCR1_AXI_RESP_BP   (1)
+    .SCR1_AXI_RESP_BP   (1),
 `else // SCR1_IMEM_AXI_RESP_BP
-    .SCR1_AXI_RESP_BP   (0)
+    .SCR1_AXI_RESP_BP   (0),
 `endif // SCR1_IMEM_AXI_RESP_BP
+    .SCR1_AXI_BURST_ENABLE (SCR1_ICACHE_AXI_BURST_ENABLE),
+    .SCR1_AXI_MAX_READ_BURST_BEATS (SCR1_AXI_MAX_READ_BURST_BEATS)
 ) i_imem_axi (
     .clk            (clk                    ),
     .rst_n          (axi_rst_n              ),
@@ -873,8 +772,13 @@ scr1_mem_axi #(
     .core_width     (SCR1_MEM_WIDTH_WORD    ),
     .core_addr      (axi_imem_addr          ),
     .core_wdata     ('0                     ),
+    .core_burst_len (axi_imem_burst_len     ),
     .core_rdata     (axi_imem_rdata         ),
     .core_resp      (axi_imem_resp          ),
+    .core_rvalid    (axi_imem_rvalid        ),
+    .core_rlast     (axi_imem_rlast         ),
+    .core_beat_rdata(axi_imem_beat_rdata    ),
+    .core_beat_resp (axi_imem_beat_resp     ),
 
     // AXI I/O
     .awid           (io_axi_imem_awid       ),
@@ -922,8 +826,6 @@ scr1_mem_axi #(
     .rvalid         (io_axi_imem_rvalid     ),
     .rready         (io_axi_imem_rready     )
 );
-
-
 //-------------------------------------------------------------------------------
 // Data memory AXI bridge
 //-------------------------------------------------------------------------------
@@ -934,10 +836,12 @@ scr1_mem_axi #(
     .SCR1_AXI_REQ_BP    (0),
 `endif // SCR1_DMEM_AXI_REQ_BP
 `ifdef SCR1_DMEM_AXI_RESP_BP
-    .SCR1_AXI_RESP_BP   (1)
+    .SCR1_AXI_RESP_BP   (1),
 `else // SCR1_DMEM_AXI_RESP_BP
-    .SCR1_AXI_RESP_BP   (0)
+    .SCR1_AXI_RESP_BP   (0),
 `endif // SCR1_DMEM_AXI_RESP_BP
+    .SCR1_AXI_BURST_ENABLE (SCR1_DCACHE_AXI_BURST_ENABLE),
+    .SCR1_AXI_MAX_READ_BURST_BEATS (SCR1_AXI_MAX_READ_BURST_BEATS)
 ) i_dmem_axi (
     .clk            (clk                    ),
     .rst_n          (axi_rst_n              ),
@@ -951,8 +855,13 @@ scr1_mem_axi #(
     .core_width     (axi_dmem_width         ),
     .core_addr      (axi_dmem_addr          ),
     .core_wdata     (axi_dmem_wdata         ),
+    .core_burst_len (axi_dmem_burst_len     ),
     .core_rdata     (axi_dmem_rdata         ),
     .core_resp      (axi_dmem_resp          ),
+    .core_rvalid    (axi_dmem_rvalid        ),
+    .core_rlast     (axi_dmem_rlast         ),
+    .core_beat_rdata(axi_dmem_beat_rdata    ),
+    .core_beat_resp (axi_dmem_beat_resp     ),
 
     // AXI I/O
     .awid           (io_axi_dmem_awid       ),
@@ -1000,7 +909,6 @@ scr1_mem_axi #(
     .rvalid         (io_axi_dmem_rvalid     ),
     .rready         (io_axi_dmem_rready     )
 );
-
 //-------------------------------------------------------------------------------
 // AXI reinit logic
 //-------------------------------------------------------------------------------
@@ -1009,4 +917,80 @@ always_ff @(negedge core_rst_n_local, posedge clk) begin
     else if (axi_imem_idle & axi_dmem_idle)     axi_reinit <= 1'b0;
 end
 
+`ifdef SCR1_TRGT_SIMULATION
+
+`ifdef SCR1_IMEM_ROUTER_EN
+cache_perf_monitor #(
+    .CACHE_NAME    ("I-cache"),
+`ifdef SCR1_ICACHE_VICTIM_EN
+    .HAS_VICTIM    (1'b1),
+`else
+    .HAS_VICTIM    (1'b0),
+`endif
+    .IS_DATA_CACHE (1'b0)
+) i_icache_perf_monitor (
+    .clk                  (clk),
+    .rst_n                (core_rst_n_local),
+
+    .perf_req_accept      (ic_perf_req_accept),
+    .perf_lookup_event    (ic_perf_lookup_event),
+    .perf_lookup_hit      (ic_perf_lookup_hit),
+    .perf_req_is_store    (1'b0),
+    .perf_refill_word     (ic_perf_refill_word),
+    .perf_refill_burst    (ic_perf_refill_burst),
+    .perf_burst_error     (ic_perf_burst_error),
+    .perf_victim_word_hit (ic_perf_victim_word_hit),
+    .perf_victim_swap     (ic_perf_victim_swap),
+
+    .response_completed   (ic_response_completed),
+    .retired_event        (perf_retired_event),
+    .memory_stall         (ic_memory_stall),
+    .axi_ar_backpressure  (io_axi_imem_arvalid &&
+                           !io_axi_imem_arready),
+    .axi_r_backpressure   (io_axi_imem_rvalid &&
+                           !io_axi_imem_rready),
+    .axi_aw_backpressure  (1'b0),
+    .axi_w_backpressure   (1'b0),
+    .axi_b_backpressure   (1'b0)
+);
+`endif // SCR1_IMEM_ROUTER_EN
+
+cache_perf_monitor #(
+    .CACHE_NAME    ("D-cache"),
+`ifdef SCR1_DCACHE_VICTIM_EN
+    .HAS_VICTIM    (1'b1),
+`else
+    .HAS_VICTIM    (1'b0),
+`endif
+    .IS_DATA_CACHE (1'b1)
+) i_dcache_perf_monitor (
+    .clk                  (clk),
+    .rst_n                (core_rst_n_local),
+
+    .perf_req_accept      (dc_perf_req_accept),
+    .perf_lookup_event    (dc_perf_lookup_event),
+    .perf_lookup_hit      (dc_perf_lookup_hit),
+    .perf_req_is_store    (dc_perf_req_is_store),
+    .perf_refill_word     (dc_perf_refill_word),
+    .perf_refill_burst    (dc_perf_refill_burst),
+    .perf_burst_error     (dc_perf_burst_error),
+    .perf_victim_word_hit (dc_perf_victim_word_hit),
+    .perf_victim_swap     (dc_perf_victim_swap),
+
+    .response_completed   (dc_response_completed),
+    .retired_event        (perf_retired_event),
+    .memory_stall         (dc_memory_stall),
+    .axi_ar_backpressure  (io_axi_dmem_arvalid &&
+                           !io_axi_dmem_arready),
+    .axi_r_backpressure   (io_axi_dmem_rvalid &&
+                           !io_axi_dmem_rready),
+    .axi_aw_backpressure  (io_axi_dmem_awvalid &&
+                           !io_axi_dmem_awready),
+    .axi_w_backpressure   (io_axi_dmem_wvalid &&
+                           !io_axi_dmem_wready),
+    .axi_b_backpressure   (io_axi_dmem_bvalid &&
+                           !io_axi_dmem_bready)
+);
+
+`endif
 endmodule : scr1_top_axi

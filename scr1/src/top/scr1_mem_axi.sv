@@ -12,7 +12,9 @@ module scr1_mem_axi
     parameter SCR1_AXI_IDWIDTH      = 4,
     parameter SCR1_ADDR_WIDTH       = 32,
     parameter SCR1_AXI_REQ_BP       = 1,
-    parameter SCR1_AXI_RESP_BP      = 1
+    parameter SCR1_AXI_RESP_BP      = 1,
+    parameter bit SCR1_AXI_BURST_ENABLE = 1'b1,
+    parameter int unsigned SCR1_AXI_MAX_READ_BURST_BEATS = 8
 )
 (
     // Clock and Reset
@@ -27,8 +29,16 @@ module scr1_mem_axi
     input   type_scr1_mem_width_e           core_width,
     input   logic [SCR1_ADDR_WIDTH-1:0]     core_addr,
     input   logic [31:0]                    core_wdata,
+    input   logic [7:0]                     core_burst_len,
     output  logic [31:0]                    core_rdata,
     output  type_scr1_mem_resp_e            core_resp,
+
+    // Streaming read-beat interface for cache-line refills. Legacy core_rdata/
+    // core_resp remain transaction-level outputs for non-cache users.
+    output  logic                           core_rvalid,
+    output  logic                           core_rlast,
+    output  logic [31:0]                    core_beat_rdata,
+    output  type_scr1_mem_resp_e            core_beat_resp,
 
     // AXI
     output  logic [SCR1_AXI_IDWIDTH-1:0]    awid,
@@ -98,6 +108,7 @@ typedef struct packed {
     type_scr1_mem_width_e                               axi_width;
     logic                    [SCR1_ADDR_WIDTH-1:0]      axi_addr;
     logic                                   [31:0]      axi_wdata;
+    logic                                    [7:0]      axi_burst_len;
 } type_scr1_request_s;
 
 typedef struct packed {
@@ -120,6 +131,8 @@ logic                                       [31:0]      rcvd_rdata;
 type_scr1_mem_resp_e                                    rcvd_resp;
 logic                                                   force_read;
 logic                                                   force_write;
+logic                                       [7:0]       core_read_burst_len;
+logic                                       [7:0]       proc_read_burst_len;
 
 
 
@@ -128,12 +141,29 @@ assign core_req_ack =   ~axi_reinit                        &
                          core_resp!=SCR1_MEM_RESP_RDY_ER;
 
 
-assign rready      = ~req_status[req_done_ptr].req_write;
-assign bready      =  req_status[req_done_ptr].req_write;
+// Do not accept a response before a request entry is live. This also prevents
+// a zero-latency AXI read response from racing the cache controller's transition
+// from REFILL_REQ to REFILL_WAIT.
+assign rready      = req_status[req_done_ptr].req_resp
+                   & ~req_status[req_done_ptr].req_write
+                   & ~req_status[req_done_ptr].req_addr;
+assign bready      = req_status[req_done_ptr].req_resp
+                   &  req_status[req_done_ptr].req_write
+                   & ~req_status[req_done_ptr].req_addr
+                   & ~req_status[req_done_ptr].req_data;
 
 
 assign force_read  = bit'(SCR1_AXI_REQ_BP) & core_req & core_req_ack & req_aval_ptr==req_proc_ptr & core_cmd==SCR1_MEM_CMD_RD;
 assign force_write = bit'(SCR1_AXI_REQ_BP) & core_req & core_req_ack & req_aval_ptr==req_proc_ptr & core_cmd==SCR1_MEM_CMD_WR;
+
+assign core_read_burst_len =
+    (SCR1_AXI_BURST_ENABLE && (core_cmd == SCR1_MEM_CMD_RD))
+        ? core_burst_len : 8'd0;
+assign proc_read_burst_len =
+    (SCR1_AXI_BURST_ENABLE
+     && req_status[req_proc_ptr].req_resp
+     && !req_status[req_proc_ptr].req_write)
+        ? req_fifo[req_proc_ptr].axi_burst_len : 8'd0;
 
 
 always_comb begin: idle_status
@@ -145,9 +175,10 @@ end
 
 always_ff @(posedge clk) begin
     if (core_req & core_req_ack) begin
-        req_fifo[req_aval_ptr].axi_width <= core_width;
-        req_fifo[req_aval_ptr].axi_addr  <= core_addr;
-        req_fifo[req_aval_ptr].axi_wdata <= core_wdata;
+        req_fifo[req_aval_ptr].axi_width     <= core_width;
+        req_fifo[req_aval_ptr].axi_addr      <= core_addr;
+        req_fifo[req_aval_ptr].axi_wdata     <= core_wdata;
+        req_fifo[req_aval_ptr].axi_burst_len <= core_read_burst_len;
     end
 end
 
@@ -296,6 +327,32 @@ always_comb begin
     endcase
 end
 
+// Streaming response seen by the cache hierarchy. A read produces one valid
+// pulse for every accepted AXI R beat. Writes produce only a terminal beat_resp
+// from the AXI B channel and never assert core_rvalid.
+assign core_rvalid     = rvalid & rready
+                       & req_status[req_done_ptr].req_resp
+                       & ~req_status[req_done_ptr].req_write;
+assign core_rlast      = core_rvalid & rlast;
+assign core_beat_rdata = core_rvalid ? rcvd_rdata : '0;
+
+always_comb begin
+    core_beat_resp = SCR1_MEM_RESP_NOTRDY;
+
+    if (core_rvalid) begin
+        core_beat_resp = (rresp == 2'b00)
+                       ? SCR1_MEM_RESP_RDY_OK
+                       : SCR1_MEM_RESP_RDY_ER;
+    end else if (bvalid & bready
+                 & req_status[req_done_ptr].req_resp
+                 & req_status[req_done_ptr].req_write) begin
+        core_beat_resp = (bresp == 2'b00)
+                       ? SCR1_MEM_RESP_RDY_OK
+                       : SCR1_MEM_RESP_RDY_ER;
+    end
+end
+
+
 
 generate
     if (SCR1_AXI_RESP_BP == 1) begin : axi_resp_bp
@@ -327,7 +384,7 @@ assign awuser   = '0;
 assign awqos    = '0;
 
 assign arid     = SCR1_AXI_IDWIDTH'(0);
-assign arlen    = 8'd0;
+assign arlen    = force_read ? core_read_burst_len : proc_read_burst_len;
 assign arsize   = (force_read) ? width2axsize(core_width) : width2axsize(req_fifo[req_proc_ptr].axi_width);
 assign arburst  = 2'd1;
 assign arcache  = 4'd2;
@@ -342,6 +399,76 @@ assign wuser    = '0;
 
 
 `ifdef SCR1_TRGT_SIMULATION
+//-------------------------------------------------------------------------------
+// Burst configuration checks and counters
+//-------------------------------------------------------------------------------
+logic [63:0] perf_read_bursts;
+logic [63:0] perf_read_burst_beats;
+logic [63:0] perf_single_reads;
+logic [63:0] perf_burst_errors;
+logic        perf_burst_error_active_q;
+
+initial begin
+    if ((SCR1_AXI_MAX_READ_BURST_BEATS < 1)
+        || (SCR1_AXI_MAX_READ_BURST_BEATS > 256)) begin
+        $fatal(1, "scr1_mem_axi: SCR1_AXI_MAX_READ_BURST_BEATS must be 1..256");
+    end
+end
+
+always_ff @(posedge clk or negedge rst_n) begin
+    if (!rst_n) begin
+        perf_read_bursts          <= 64'd0;
+        perf_read_burst_beats     <= 64'd0;
+        perf_single_reads         <= 64'd0;
+        perf_burst_errors         <= 64'd0;
+        perf_burst_error_active_q <= 1'b0;
+    end else begin
+        if (arvalid & arready) begin
+            if (arlen == 8'd0) begin
+                perf_single_reads <= perf_single_reads + 64'd1;
+            end else begin
+                perf_read_bursts <= perf_read_bursts + 64'd1;
+            end
+        end
+
+        if (core_rvalid && (req_fifo[req_done_ptr].axi_burst_len != 8'd0)) begin
+            perf_read_burst_beats <= perf_read_burst_beats + 64'd1;
+        end
+
+        if (core_rvalid && (core_beat_resp == SCR1_MEM_RESP_RDY_ER)) begin
+            perf_burst_error_active_q <= 1'b1;
+        end
+
+        if (core_rlast) begin
+            if ((req_fifo[req_done_ptr].axi_burst_len != 8'd0)
+                && (perf_burst_error_active_q
+                    || (core_beat_resp == SCR1_MEM_RESP_RDY_ER))) begin
+                perf_burst_errors <= perf_burst_errors + 64'd1;
+            end
+            perf_burst_error_active_q <= 1'b0;
+        end
+    end
+end
+
+always_ff @(posedge clk) begin
+    if (rst_n && core_req && core_req_ack && (core_cmd == SCR1_MEM_CMD_RD)) begin
+        assert ((int'(core_read_burst_len) + 1) <= SCR1_AXI_MAX_READ_BURST_BEATS)
+            else $error("scr1_mem_axi: read burst exceeds configured maximum");
+    end
+end
+
+final begin
+    $display("");
+    $display("========================================");
+    $display(" AXI read counters");
+    $display("========================================");
+    $display("read bursts       : %0d", perf_read_bursts);
+    $display("read burst beats  : %0d", perf_read_burst_beats);
+    $display("single reads      : %0d", perf_single_reads);
+    $display("burst errors      : %0d", perf_burst_errors);
+    $display("========================================");
+end
+
 //-------------------------------------------------------------------------------
 // Assertion
 //-------------------------------------------------------------------------------
