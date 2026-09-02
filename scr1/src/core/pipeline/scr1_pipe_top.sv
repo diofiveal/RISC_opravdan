@@ -1,4 +1,4 @@
-/// Copyright by Syntacore LLC Â© 2016-2021. See LICENSE for details
+/// Copyright by Syntacore LLC © 2016-2021. See LICENSE for details
 /// @file       <scr1_pipe_top.sv>
 /// @brief      SCR1 pipeline top
 ///
@@ -308,25 +308,46 @@ type_scr1_exc_code_e                mem2exu_exc_code;
 `endif
 
 `ifdef SCR1_BPU_EN
-
 // IFU -> IDU
 logic                       ifu2idu_bpu_pred;
 logic                       ifu2idu_bpu_vld;
+logic [`SCR1_XLEN-1:0]      ifu2idu_bpu_target;
+logic                       ifu2idu_bpu_str;
+logic                       ifu2idu_bpu_steer_bypass;
 
 // IDU -> EXU
 logic                       idu2exu_bpu_pred;
 logic                       idu2exu_bpu_vld;
+logic [`SCR1_XLEN-1:0]      idu2exu_bpu_target;
+logic                       idu2exu_bpu_str;
+logic                       idu2exu_bpu_steer_bypass;
 
-// EXU -> IFU, BPU training
+// EXU -> IFU, BPU training / RAS
 logic                       exu2ifu_bpu_train_vld;
 logic [`SCR1_XLEN-1:0]      exu2ifu_bpu_train_pc;
 logic                       exu2ifu_bpu_train_taken;
+logic [`SCR1_XLEN-1:0]      exu2ifu_bpu_train_target;
+logic                       exu2ifu_bpu_ras_push;
+logic [`SCR1_XLEN-1:0]      exu2ifu_bpu_ras_push_addr;
+logic                       exu2ifu_bpu_ras_is_return;
+logic                       exu2ifu_bpu_flush;
 
 `endif // SCR1_BPU_EN
 
 //-------------------------------------------------------------------------------
 // Pipeline logic
 //-------------------------------------------------------------------------------
+logic                       ifu_pc_new_req;
+logic [`SCR1_XLEN-1:0]      ifu_pc_new;
+
+`ifdef SCR1_EARLY_BRANCH
+assign ifu_pc_new_req = new_pc_req | idu2ifu_branch_req;
+assign ifu_pc_new     = new_pc_req ? new_pc : idu2ifu_branch_target;
+`else
+assign ifu_pc_new_req = new_pc_req;
+assign ifu_pc_new     = new_pc;
+`endif // SCR1_EARLY_BRANCH
+
 assign stop_fetch   = wfi_run2halt
 `ifdef SCR1_DBG_EN
                     | fetch_pbuf
@@ -362,8 +383,8 @@ scr1_pipe_ifu i_pipe_ifu (
     .imem2ifu_resp_i          (imem2pipe_resp_i   ),
 
     // New PC interface
-    .exu2ifu_pc_new_req_i     (new_pc_req         ),
-    .exu2ifu_pc_new_i         (new_pc             ),
+    .exu2ifu_pc_new_req_i     (ifu_pc_new_req     ),
+    .exu2ifu_pc_new_i         (ifu_pc_new         ),
     .pipe2ifu_stop_fetch_i    (stop_fetch         ),
 
 `ifdef SCR1_DBG_EN
@@ -378,18 +399,24 @@ scr1_pipe_ifu i_pipe_ifu (
     .ifu2pipe_imem_txns_pnd_o (imem_txns_pending  ),
 `endif // SCR1_CLKCTRL_EN
 `ifdef SCR1_EARLY_BRANCH
-    .ifu2idu_pc_o            (ifu2idu_pc),
-    .idu2ifu_branch_req_i    (idu2ifu_branch_req),
-    .idu2ifu_branch_target_i (idu2ifu_branch_target),
+    .ifu2idu_pc_o              (ifu2idu_pc),
 `endif // SCR1_EARLY_BRANCH
 
 `ifdef SCR1_BPU_EN
-    .ifu2idu_bpu_pred_o        (ifu2idu_bpu_pred),
-    .ifu2idu_bpu_vld_o         (ifu2idu_bpu_vld),
+    .exu2ifu_bpu_flush_i         (exu2ifu_bpu_flush),
+    .ifu2idu_bpu_pred_o          (ifu2idu_bpu_pred),
+    .ifu2idu_bpu_vld_o           (ifu2idu_bpu_vld),
+    .ifu2idu_bpu_target_o        (ifu2idu_bpu_target),
+    .ifu2idu_bpu_str_o           (ifu2idu_bpu_str),
+    .ifu2idu_bpu_steer_bypass_o  (ifu2idu_bpu_steer_bypass),
 
-    .exu2ifu_bpu_train_vld_i   (exu2ifu_bpu_train_vld),
-    .exu2ifu_bpu_train_pc_i    (exu2ifu_bpu_train_pc),
-    .exu2ifu_bpu_train_taken_i (exu2ifu_bpu_train_taken),
+    .exu2ifu_bpu_train_vld_i     (exu2ifu_bpu_train_vld),
+    .exu2ifu_bpu_train_pc_i      (exu2ifu_bpu_train_pc),
+    .exu2ifu_bpu_train_taken_i   (exu2ifu_bpu_train_taken),
+    .exu2ifu_bpu_train_target_i  (exu2ifu_bpu_train_target),
+    .exu2ifu_bpu_ras_push_i      (exu2ifu_bpu_ras_push),
+    .exu2ifu_bpu_ras_push_addr_i (exu2ifu_bpu_ras_push_addr),
+    .exu2ifu_bpu_ras_is_return_i (exu2ifu_bpu_ras_is_return),
 `endif
 
     // IFU <-> IDU interface
@@ -432,11 +459,17 @@ scr1_pipe_idu i_pipe_idu (
     .idu2ifu_branch_target_o (idu2ifu_branch_target),
 `endif // SCR1_EARLY_BRANCH
 `ifdef SCR1_BPU_EN
-    .ifu2idu_bpu_pred_i      (ifu2idu_bpu_pred  ),
-    .ifu2idu_bpu_vld_i       (ifu2idu_bpu_vld   ),
- 
-    .idu2exu_bpu_pred_o      (idu2exu_bpu_pred  ),
-    .idu2exu_bpu_vld_o       (idu2exu_bpu_vld   ),
+    .ifu2idu_bpu_pred_i          (ifu2idu_bpu_pred),
+    .ifu2idu_bpu_vld_i           (ifu2idu_bpu_vld),
+    .ifu2idu_bpu_target_i        (ifu2idu_bpu_target),
+    .ifu2idu_bpu_str_i           (ifu2idu_bpu_str),
+    .ifu2idu_bpu_steer_bypass_i  (ifu2idu_bpu_steer_bypass),
+
+    .idu2exu_bpu_pred_o          (idu2exu_bpu_pred),
+    .idu2exu_bpu_vld_o           (idu2exu_bpu_vld),
+    .idu2exu_bpu_target_o        (idu2exu_bpu_target),
+    .idu2exu_bpu_str_o           (idu2exu_bpu_str),
+    .idu2exu_bpu_steer_bypass_o  (idu2exu_bpu_steer_bypass),
 `endif
     .exu2idu_rdy_i          (exu2idu_rdy       )
 );
@@ -463,12 +496,19 @@ scr1_pipe_exu i_pipe_exu (
     .idu2exu_use_imm_i              (idu2exu_use_imm         ),
 `endif // SCR1_NO_EXE_STAGE
 `ifdef SCR1_BPU_EN
-    .idu2exu_bpu_pred_i             (idu2exu_bpu_pred        ),
-    .idu2exu_bpu_vld_i              (idu2exu_bpu_vld         ),
-
-    .exu2ifu_bpu_train_vld_o        (exu2ifu_bpu_train_vld   ),
-    .exu2ifu_bpu_train_pc_o         (exu2ifu_bpu_train_pc    ),
-    .exu2ifu_bpu_train_taken_o      (exu2ifu_bpu_train_taken ),
+    .idu2exu_bpu_pred_i             (idu2exu_bpu_pred),
+    .idu2exu_bpu_vld_i              (idu2exu_bpu_vld),
+    .idu2exu_bpu_target_i           (idu2exu_bpu_target),
+    .idu2exu_bpu_str_i              (idu2exu_bpu_str),
+    .idu2exu_bpu_steer_bypass_i     (idu2exu_bpu_steer_bypass),
+    .exu2ifu_bpu_train_vld_o        (exu2ifu_bpu_train_vld),
+    .exu2ifu_bpu_train_pc_o         (exu2ifu_bpu_train_pc),
+    .exu2ifu_bpu_train_taken_o      (exu2ifu_bpu_train_taken),
+    .exu2ifu_bpu_train_target_o     (exu2ifu_bpu_train_target),
+    .exu2ifu_bpu_ras_push_o         (exu2ifu_bpu_ras_push),
+    .exu2ifu_bpu_ras_push_addr_o    (exu2ifu_bpu_ras_push_addr),
+    .exu2ifu_bpu_ras_is_return_o    (exu2ifu_bpu_ras_is_return),
+    .exu2ifu_bpu_flush_o            (exu2ifu_bpu_flush),
 `endif
 
     // EXU <-> MPRF interface
