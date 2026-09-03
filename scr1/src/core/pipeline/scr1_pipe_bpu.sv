@@ -176,7 +176,8 @@ assign ch1_is_rvc       = (ch1_lo[1:0] != 2'b11);
 assign ch1_is_rvi_b     = ~ch1_is_rvc & (ch1_lo[6:0] == 7'h63);
 assign ch1_is_rvi_jal   = ~ch1_is_rvc & (ch1_lo[6:0] == 7'h6F);
 assign ch1_is_rvi_jalr  = ~ch1_is_rvc & (ch1_lo[6:0] == 7'h67);
-assign ch1_is_rvi_ret   = ch1_is_rvi_jalr & (ch1_lo[19:15] == 5'd1) & (ch1_lo[11:7] == 5'd0);
+// rs1 is instruction[19:15], which is outside the 16-bit ch1_lo slice.
+assign ch1_is_rvi_ret   = ch1_is_rvi_jalr & (ch1_instr_i[19:15] == 5'd1) & (ch1_lo[11:7] == 5'd0);
 assign ch1_is_rvc_branch= ch1_is_rvc & (ch1_lo[1:0] == 2'b01)
                         & ((ch1_lo[15:13] == 3'b110) | (ch1_lo[15:13] == 3'b111));
 assign ch1_is_rvc_jump  = ch1_is_rvc & ((ch1_lo[15:13] == 3'b101) | (ch1_lo[15:13] == 3'b001))
@@ -226,7 +227,7 @@ assign ch1_imm_cj[0]   = 1'b0;
 // slice, not the whole 32-bit immediate vector. Using the full vector made
 // the RHS 51 bits and destroyed sign extension (negative branch offsets got
 // zero-extended), so every predicted taken-target with a backward offset was
-// garbage — the steer fetched a wrong path and the EXU flush-skip
+// garbage - the steer fetched a wrong path and the EXU flush-skip
 // (predicted_target == resolved_target) could never match.
 always_comb begin
     case (1'b1)
@@ -332,8 +333,9 @@ logic                                   ftb_train_sel;
 
 assign ftb_train_idx  = bpu_train_pc_i[FTB_IDX_WIDTH+1:2];
 assign ftb_train_tag  = bpu_train_pc_i[FTB_IDX_WIDTH+FTB_TAG_WIDTH+1:FTB_IDX_WIDTH+2];
-assign ftb_pred_idx   = ftb_idx_pc_i[FTB_IDX_WIDTH-1:0];
-assign ftb_pred_tag   = ftb_idx_pc_i[FTB_IDX_WIDTH+FTB_TAG_WIDTH-1:FTB_IDX_WIDTH];
+// ftb_idx_pc_i keeps original PC bit numbering [XLEN-1:2]. Use PC[6:2]/PC[11:7].
+assign ftb_pred_idx   = ftb_idx_pc_i[FTB_IDX_WIDTH+1:2];
+assign ftb_pred_tag   = ftb_idx_pc_i[FTB_IDX_WIDTH+FTB_TAG_WIDTH+1:FTB_IDX_WIDTH+2];
 assign ftb_train_sel  = bpu_train_vld_i & bpu_train_taken_i & (bpu_train_pc_i[1] == 1'b0);
 
 always_ff @(posedge clk, negedge rst_n) begin
