@@ -184,6 +184,21 @@ logic [`SCR1_IMEM_AWIDTH-1:0]                       core_imem_addr;
 logic [`SCR1_IMEM_DWIDTH-1:0]                       core_imem_rdata;
 type_scr1_mem_resp_e                                core_imem_resp;
 
+`ifdef SCR1_IMEM_SKID_BUF
+// Buffered instruction-memory request interface to the IMEM router
+logic                                               router_imem_req_ack_raw;
+logic                                               router_imem_req;
+type_scr1_mem_cmd_e                                 router_imem_cmd;
+logic [`SCR1_IMEM_AWIDTH-1:0]                       router_imem_addr;
+
+logic                                               imem_skid_vd_ff;
+type_scr1_mem_cmd_e                                 imem_skid_cmd_ff;
+logic [`SCR1_IMEM_AWIDTH-1:0]                       imem_skid_addr_ff;
+
+logic                                               imem_skid_capture;
+logic                                               imem_skid_pop;
+`endif // SCR1_IMEM_SKID_BUF
+
 // Data memory interface from core to router
 logic                                               core_dmem_req_ack;
 logic                                               core_dmem_req;
@@ -524,6 +539,68 @@ scr1_timer i_timer (
 //-------------------------------------------------------------------------------
 // Instruction memory router
 //-------------------------------------------------------------------------------
+`ifdef SCR1_IMEM_SKID_BUF
+// ------------------------------------------------------------
+// 1-entry fall-through IMEM request buffer
+// ------------------------------------------------------------
+
+// IFU talks only to local registered state.
+// No combinational cache/router ACK path back to the core.
+assign core_imem_req_ack = ~imem_skid_vd_ff;
+
+// If the buffer is empty, request falls through directly
+// from IFU to the IMEM router.
+//
+// If the buffer contains a stalled request, the buffered
+// request owns the router interface.
+assign router_imem_req =
+       imem_skid_vd_ff
+     ? 1'b1
+     : core_imem_req;
+
+assign router_imem_cmd =
+       imem_skid_vd_ff
+     ? imem_skid_cmd_ff
+     : core_imem_cmd;
+
+assign router_imem_addr =
+       imem_skid_vd_ff
+     ? imem_skid_addr_ff
+     : core_imem_addr;
+
+// Empty buffer + core request + downstream did not accept:
+// core already saw ACK from the local buffer, therefore
+// we must save the request.
+assign imem_skid_capture =
+       ~imem_skid_vd_ff
+     & core_imem_req
+     & ~router_imem_req_ack_raw;
+
+// Buffered request was finally accepted by router/cache.
+assign imem_skid_pop =
+       imem_skid_vd_ff
+     & router_imem_req_ack_raw;
+
+// Buffer storage
+always_ff @(posedge clk, negedge core_rst_n_local) begin
+    if (~core_rst_n_local) begin
+        imem_skid_vd_ff   <= 1'b0;
+        imem_skid_cmd_ff  <= SCR1_MEM_CMD_RD;
+        imem_skid_addr_ff <= '0;
+    end else begin
+        if (imem_skid_pop) begin
+            imem_skid_vd_ff <= 1'b0;
+        end
+
+        if (imem_skid_capture) begin
+            imem_skid_vd_ff   <= 1'b1;
+            imem_skid_cmd_ff  <= core_imem_cmd;
+            imem_skid_addr_ff <= core_imem_addr;
+        end
+    end
+end
+`endif // SCR1_IMEM_SKID_BUF
+
 scr1_imem_router #(
     .SCR1_ADDR_MASK             (SCR1_TCM_ADDR_MASK),
     .SCR1_ADDR_PATTERN          (SCR1_TCM_ADDR_PATTERN)
@@ -532,10 +609,17 @@ scr1_imem_router #(
     .clk            (clk              ),
 
     // Interface to core
+`ifdef SCR1_IMEM_SKID_BUF
+    .imem_req_ack   (router_imem_req_ack_raw),
+    .imem_req       (router_imem_req        ),
+    .imem_cmd       (router_imem_cmd        ),
+    .imem_addr      (router_imem_addr       ),
+`else
     .imem_req_ack   (core_imem_req_ack),
     .imem_req       (core_imem_req    ),
     .imem_cmd       (core_imem_cmd    ),
     .imem_addr      (core_imem_addr   ),
+`endif // SCR1_IMEM_SKID_BUF
     .imem_rdata     (core_imem_rdata  ),
     .imem_resp      (core_imem_resp   ),
 
