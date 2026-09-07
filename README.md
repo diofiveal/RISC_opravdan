@@ -38,25 +38,6 @@
 ## Архитектура
 <img width="1200" height="1400" alt="Архитектура" src="https://github.com/user-attachments/assets/0e628df3-2cac-4b88-8c3d-da040f2965e5" />
 
-```mermaid
-flowchart TD
-    CORE["SCR1 core"]
-    IR["Instruction router"]
-    DR["Data router"]
-    IC["L1 I-cache"]
-    VC["Instruction Victim Cache"]
-    DC["L1 D-cache"]
-    WB["4-entry write buffer"]
-    IA["Instruction AXI master"]
-    DA["Data AXI master"]
-    MEM["AXI interconnect / BRAM / DDR2"]
-
-    CORE --> IR --> IC
-    IC <--> VC
-    IC --> IA --> MEM
-    CORE --> DR --> DC --> WB --> DA --> MEM
-```
-
 Instruction и data paths используют отдельные AXI master-интерфейсы. Кэши находятся между штатными SCR1 memory routers и AXI bridges. TCM и memory-mapped timer сохраняют свои места в исходной архитектуре SCR1 и не превращаются в кэшируемую память.
 
 
