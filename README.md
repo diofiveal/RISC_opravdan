@@ -59,7 +59,6 @@ flowchart TD
 
 Instruction и data paths используют отдельные AXI master-интерфейсы. Кэши находятся между штатными SCR1 memory routers и AXI bridges. TCM и memory-mapped timer сохраняют свои места в исходной архитектуре SCR1 и не превращаются в кэшируемую память.
 
-![Текущая микроархитектура](https://github.com/user-attachments/assets/c237ef76-a11c-4c58-a691-de50e0e0e581)
 
 ## Текущая конфигурация
 
