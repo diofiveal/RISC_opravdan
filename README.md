@@ -279,14 +279,8 @@ vivado -mode batch -source nexys_cache_victim.tcl \
 
 ## Направления дальнейшей работы
 
-- отдельные self-checking testbench для AXI burst и write buffer;
-- проверка RAW-зависимостей и возможный store-to-load forwarding;
-- write combining для соседних store;
-- несколько outstanding cache misses или refill-запросов;
-- подбор размера cache line и глубины write buffer;
-- сравнение write-allocate и no-write-allocate на реальных нагрузках;
-- измерение производительности, ресурсов FPGA и энергопотребления;
-- перенос улучшенной подсистемы на AMD Versal VD100.
+- Реализация stride predictor
+- Увеличение ширины AXI burst, перенос части данных полученных из burst в prefetch buffer
 
 ## Происхождение проекта
 
