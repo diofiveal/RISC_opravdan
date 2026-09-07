@@ -1,264 +1,314 @@
-# RISC оправдан
+# RISC оправдан: улучшенная подсистема памяти SCR1
 
-# SCR1 Cache Improvements
+Экспериментальная версия открытого 32-битного RISC-V-процессора [SCR1](https://github.com/syntacore/scr1) с переработанной подсистемой памяти для FPGA.
 
-## Краткое описание
-Основная цель работы - улучшение подсистемы памяти открытого процессора SCR1
-В данной версии SCR1 подсистема памяти была расширена кэш-памятью первого уровня для инструкций и данных, а также небольшим Victim Cache для instruction path.
+В проект добавлены раздельные L1-кэши инструкций и данных, Victim Cache для инструкций, буфер отложенной записи и поддержка AXI burst при загрузке строк кэша. Основная FPGA-платформа — **Digilent Nexys A7-100T** с внешней DDR2.
 
-Основные добавленные блоки:
+> Актуальная реализация находится в ветке [`scr1-cache-improve`](https://github.com/diofiveal/RISC_opravdan/tree/scr1-cache-improve).
 
-- L1 Instruction Cache;
-- Instruction Victim Cache;
-- L1 Data Cache;
-- cache bypass для диапазона `0xFF00_0000 - 0xFFFF_FFFF`;
-- performance counters для анализа работы кэшей в simulation;
-- BRAM-ориентированная реализация массивов DATA/TAG.
+## Цель проекта
 
----
+Цель работы — уменьшить время, которое SCR1 теряет в ожидании внешней памяти, сохранив небольшую и понятную микроархитектуру, пригодную для FPGA-прототипирования.
+
+Исследуются четыре дополняющих друг друга подхода:
+
+- повторное использование инструкций и данных в L1-кэшах;
+- уменьшение конфликтных промахов I-cache с помощью Victim Cache;
+- скрытие задержки write-through store через небольшой write buffer;
+- более эффективная загрузка строки кэша одной AXI burst-транзакцией.
+
+Проект также служит стендом для измерения hit/miss rate, refill-трафика, stall cycles и эффективности write buffer.
+
+## Что реализовано
+
+- direct-mapped L1 Instruction Cache размером 2 KiB;
+- fully associative Instruction Victim Cache на 4 строки;
+- swap/promotion строки из Victim Cache обратно в L1 I-cache;
+- direct-mapped L1 Data Cache размером 2 KiB;
+- write-through store policy;
+- no-write-allocate для store miss по умолчанию;
+- упорядоченный write buffer на 4 записи;
+- AXI4 INCR burst для refill строк I-cache и D-cache;
+- одиночные AXI-транзакции для записей;
+- обход кэшей для диапазона `0xFF00_0000–0xFFFF_FFFF`;
+- BRAM-ориентированные DATA/TAG-массивы;
+- simulation-only performance counters;
+- Tcl-скрипт для создания проекта Vivado под Nexys A7-100T.
 
 ## Архитектура
+<img width="1200" height="1400" alt="Архитектура" src="https://github.com/user-attachments/assets/0e628df3-2cac-4b88-8c3d-da040f2965e5" />
 
-<img width="1200" height="1400" alt="Текущая Микроархитектура" src="https://github.com/user-attachments/assets/c237ef76-a11c-4c58-a691-de50e0e0e581" />
+```mermaid
+flowchart TD
+    CORE["SCR1 core"]
+    IR["Instruction router"]
+    DR["Data router"]
+    IC["L1 I-cache"]
+    VC["Instruction Victim Cache"]
+    DC["L1 D-cache"]
+    WB["4-entry write buffer"]
+    IA["Instruction AXI master"]
+    DA["Data AXI master"]
+    MEM["AXI interconnect / BRAM / DDR2"]
 
-# L1 Instruction Cache
+    CORE --> IR --> IC
+    IC <--> VC
+    IC --> IA --> MEM
+    CORE --> DR --> DC --> WB --> DA --> MEM
+```
 
-## Основные характеристики
+Instruction и data paths используют отдельные AXI master-интерфейсы. Кэши находятся между штатными SCR1 memory routers и AXI bridges. TCM и memory-mapped timer сохраняют свои места в исходной архитектуре SCR1 и не превращаются в кэшируемую память.
 
-- Тип: direct-mapped L1 instruction cache;
-- Размер по умолчанию: **2 KiB**;
-- Размер cache line: **8 байт**;
-- 2 слова по 32 бита в одной cache line;
-- Blocking cache;
-- Последовательный refill строки по словам;
-- DATA и TAG массивы реализованы как синхронная память;
-- DATA/TAG ориентированы на использование FPGA Block RAM;
-- VALID bits хранятся отдельно в регистрах;
-- Адреса `0xFF00_0000 - 0xFFFF_FFFF` обходят L1 I-cache.
+![Текущая микроархитектура](https://github.com/user-attachments/assets/c237ef76-a11c-4c58-a691-de50e0e0e581)
 
-## Состав блока
+## Текущая конфигурация
 
-### `icache.sv`
+| Блок | Конфигурация по умолчанию | Организация |
+| --- | --- | --- |
+| L1 I-cache | 2 KiB, строка 8 B | Direct-mapped, blocking |
+| Instruction Victim Cache | 4 строки по 8 B | Fully associative, Round-Robin |
+| L1 D-cache | 2 KiB, строка 8 B | Direct-mapped, blocking |
+| Write buffer | 4 записи | Упорядоченный FIFO |
+| AXI read refill | 2 × 32-bit beat для строки 8 B | INCR burst, `ARLEN = 1` |
+| AXI store | 1 beat | `AWLEN = 0` |
 
-Хранилище L1 Instruction Cache.
+Размер строки кэша и режим burst параметризованы. Максимальная длина read burst в текущем top-level ограничена восемью beat.
 
-Основные функции:
+## L1 Instruction Cache
 
-- хранение DATA;
-- хранение TAG;
-- хранение VALID bits;
-- синхронный lookup;
-- запись данных при refill;
-- commit TAG после заполнения строки;
-- invalidation строки.
+I-cache хранит инструкции, поступающие из внешней памяти, и обслуживает повторные обращения без выхода на AXI.
 
-### `icache_controller.sv`
+Основные свойства:
 
-Управляющий модуль L1 Instruction Cache.
+- размер по умолчанию — 2 KiB;
+- строка — 8 байт, то есть два 32-битных слова;
+- direct-mapped и blocking организация;
+- синхронные DATA/TAG-массивы, ориентированные на FPGA Block RAM;
+- VALID-биты хранятся отдельно;
+- TAG фиксируется только после успешного получения всей строки;
+- при refill старая строка инвалидируется до записи новой;
+- диапазон `0xFFxx_xxxx` обслуживается в bypass-режиме.
 
-Основные функции:
+### Instruction Victim Cache
 
-- FSM обработки запросов;
-- определение hit/miss;
-- управление refill;
-- инвалидация вытесняемой строки L1 перед refill новой строки;
-- формирование запросов во внешнюю память;
-- обработка uncached/bypass обращений;
-- Victim Cache lookup;
-- сохранение вытесняемой L1 строки в Victim Cache;
-- Round-Robin выбор Victim entry.
+Victim Cache хранит строки, вытесненные из direct-mapped I-cache. Полный victim tag состоит из исходных TAG и INDEX, поэтому поиск выполняется ассоциативно по всем четырём записям.
 
-### `scr1_icache_top.sv`
+При L1 miss выполняется Victim lookup:
 
-Верхний модуль instruction cache subsystem.
+1. При Victim hit найденная строка возвращает запрошенное слово и переносится обратно в L1.
+2. Если индекс L1 уже занят, строки L1 и Victim Cache меняются местами.
+3. При L1 + Victim miss вытесняемая валидная строка L1 сохраняется в Victim Cache, после чего начинается refill из памяти.
+4. Запись для замещения выбирается по Round-Robin.
 
-Объединяет:
+Такой механизм уменьшает число повторных обращений к внешней памяти при конфликтных промахах.
 
-- `icache.sv`;
-- `icache_controller.sv`;
-- `victim_icache.sv`.
+## L1 Data Cache
 
-Также содержит simulation-only performance counters для I-cache.
+D-cache поддерживает BYTE, HALFWORD и WORD load/store с проверкой типа и выравнивания.
 
----
+Основные свойства:
 
-# Instruction Victim Cache
+- размер по умолчанию — 2 KiB;
+- строка — 8 байт, два 32-битных слова;
+- direct-mapped и blocking организация;
+- write-through: каждое cacheable store передаётся во внешнюю память;
+- store hit обновляет соответствующее слово в L1;
+- store miss по умолчанию использует no-write-allocate и не вытесняет текущую строку;
+- load miss загружает полную строку;
+- DATA RAM имеет один физический write port, общий для refill и store update;
+- диапазон `0xFFxx_xxxx` работает без кэширования.
 
-## Основные характеристики
+Параметр `SCR1_DCACHE_NO_WRITE_ALLOCATE` позволяет вернуть прежнее поведение write-allocate, если это требуется для эксперимента.
 
-- Количество entries по умолчанию: **4**;
-- Fully-associative организация;
-- Размер одной строки: **8 байт**;
-- Хранится полная вытесненная строка L1 I-cache;
-- Victim TAG формируется как комбинация L1 TAG и L1 INDEX;
-- Поиск выполняется по всем Victim entries;
-- Replacement policy: Round-Robin;
-- При Victim hit данные возвращаются непосредственно из Victim Cache;
-- Promotion/swap Victim line обратно в L1 на текущем этапе не реализован.
+## Write buffer
 
-## Состав блока
+Модуль `scr1_write_buffer.sv` отделяет завершение cacheable store со стороны процессора от более медленного ответа внешней памяти.
 
-### `victim_icache.sv`
+Write buffer представляет собой упорядоченный FIFO глубиной четыре записи. Каждая запись содержит:
 
-Хранилище и lookup-логика Victim Cache.
+- адрес;
+- данные;
+- ширину операции BYTE/HALFWORD/WORD.
 
-Основные функции:
+### Как проходит store
 
-- хранение DATA для каждой Victim entry;
-- хранение полного Victim TAG;
-- хранение VALID bits;
-- fully-associative lookup;
-- выдача выбранного слова;
-- выдача полной cache line;
-- запись вытесняемой L1 строки;
-- invalidation Victim entry.
+1. D-cache передаёт cacheable store в write buffer.
+2. Если FIFO не заполнен, запрос принимается, а D-cache получает локальное успешное завершение на следующем такте.
+3. Процессор может продолжить работу, пока write buffer последовательно отправляет накопленные записи в backing memory.
+4. Запись удаляется из FIFO только после терминального ответа внешней памяти.
+5. При заполненном FIFO следующий store останавливается до освобождения записи.
 
-### Интеграция с `icache_controller.sv`
+В один такт разрешены одновременные dequeue старой записи и enqueue новой. Это устраняет лишний пузырь между последовательными store.
 
-`icache_controller.sv` отвечает за:
+### Упорядочивание памяти
 
-- запуск Victim lookup после L1 miss;
-- выбор Victim entry для записи;
-- чтение вытесняемой L1 строки;
-- запись строки в Victim Cache;
-- продолжение refill при L1 + Victim miss.
+Записи уходят во внешнюю память строго в порядке поступления. Load/refill и uncached/MMIO store не обходят более старые buffered stores: сначала FIFO полностью освобождается, затем выполняется pass-through запрос. Благодаря этому сохраняется наблюдаемый порядок обращений к памяти.
 
-### Интеграция с `scr1_icache_top.sv`
+MMIO-обращения в диапазон `0xFFxx_xxxx` не буферизуются.
 
-`scr1_icache_top.sv` соединяет Victim Cache с L1 I-cache и его controller.
+### Ограничения текущей версии
 
----
+- write combining и объединение соседних store не реализованы;
+- store-to-load forwarding из FIFO не реализован — load ждёт освобождения буфера;
+- записи на AXI остаются single-beat;
+- поздняя ошибка backing-memory write уже не может быть возвращена завершившейся store-инструкции; вместо этого устанавливается sticky-флаг `write_error` и в simulation выводится ошибка.
 
-# L1 Data Cache
+## AXI burst refill
 
-## Основные характеристики
+В исходном последовательном варианте каждое слово строки запрашивалось отдельной транзакцией. В текущей AXI-конфигурации I-cache и D-cache формируют один INCR burst на всю строку.
 
-- Тип: direct-mapped L1 data cache;
-- Размер по умолчанию: **2 KiB**;
-- Размер cache line: **8 байт**;
-- 2 слова по 32 бита в одной cache line;
-- Blocking cache;
-- Поддержка BYTE / HALFWORD / WORD load и store;
-- Write-through policy;
-- Write-allocate при store miss;
-- Последовательный refill строки по словам;
-- DATA и TAG массивы реализованы как синхронная память;
-- DATA/TAG ориентированы на FPGA Block RAM;
-- VALID bits хранятся отдельно в регистрах;
-- Адреса `0xFF00_0000 - 0xFFFF_FFFF` обходят L1 D-cache.
+Для конфигурации по умолчанию:
 
-## Состав блока
+```text
+cache line = 8 bytes
+beat size  = 4 bytes
+beats      = 2
+ARLEN      = beats - 1 = 1
+ARSIZE     = 2  (4 bytes)
+ARBURST    = INCR
+```
 
-### `dcache.sv`
+AXI bridge выдаёт контроллеру отдельный `rvalid` для каждого принятого R-channel beat и `rlast` для последнего beat. Контроллер последовательно записывает слова в DATA RAM и делает commit TAG только после корректного завершения burst.
 
-Хранилище L1 Data Cache.
+Реализация проверяет:
 
-Основные функции:
+- допустимую длину burst;
+- соответствие `RLAST` ожидаемому последнему слову;
+- ошибки `RRESP` на любом beat;
+- отсутствие перехода строки через границу AXI 4 KiB за счёт допустимых размеров и выравнивания cache line.
 
-- хранение DATA;
-- хранение TAG;
-- хранение VALID bits;
-- синхронный lookup;
-- запись данных при refill;
-- обновление cached word после store;
-- commit TAG после refill;
-- инвалидация вытесняемой строки L1 перед refill новой строки.
+Если burst отключён параметром, refill снова выполняется отдельными single-beat read-запросами. AHB top-level всегда использует этот последовательный режим.
 
-Для DATA RAM refill и store используют один физический write port через внутренний mux.
+> Burst применяется только к чтению строк кэша. Store-транзакции остаются одиночными (`AWLEN = 0`).
 
-### `dcache_controller.sv`
+## Cache bypass и MMIO
 
-Управляющий модуль L1 Data Cache.
+Адреса `0xFF00_0000–0xFFFF_FFFF` не кэшируются. Это необходимо для корректной работы UART, BRAM bootloader и других memory-mapped устройств проекта.
 
-Основные функции:
+Для таких обращений:
 
-- FSM обработки load/store запросов;
-- проверка типа и выравнивания доступа;
-- определение hit/miss;
-- управление refill;
-- обработка BYTE / HALFWORD / WORD;
-- write-through store;
-- write-allocate при store miss;
-- управление cache update после store;
-- формирование запросов во внешнюю память;
-- обработка uncached/bypass обращений.
+- I-cache выполняет прямое чтение;
+- D-cache выполняет прямой load/store;
+- write buffer не подтверждает MMIO store заранее;
+- перед MMIO-операцией завершаются все более старые buffered stores.
 
-### `scr1_dcache_top.sv`
+## Performance counters
 
-Верхний модуль data cache subsystem.
+Счётчики доступны при определённом `SCR1_TRGT_SIMULATION` и печатаются в конце симуляции.
 
-Объединяет:
+### I-cache
 
-- `dcache.sv`;
-- `dcache_controller.sv`.
-
-Также содержит simulation-only performance counters для D-cache.
-
----
-
-# Performance counters
-
-В simulation для анализа работы L1 cache добавлены счётчики.
-
-## I-cache
-
-- accesses;
-- hits;
-- misses;
-- refill words;
+- accesses, hits и misses;
+- victim word hits и victim swaps;
+- refill words и refill bursts;
+- burst errors;
 - stall cycles.
 
-## D-cache
+### D-cache и write buffer
 
-- load accesses;
-- store accesses;
-- hits;
-- misses;
-- load misses;
-- store misses;
-- refill words;
-- stall cycles.
+- load/store accesses;
+- hits и misses отдельно для load/store;
+- store miss без allocation;
+- refill words и refill bursts;
+- burst errors;
+- stall cycles;
+- число enqueue/dequeue write buffer;
+- stall cycles из-за полного FIFO;
+- максимальная заполненность FIFO;
+- число оставшихся записей и sticky write-error status.
 
-Счётчики доступны при включённом `SCR1_TRGT_SIMULATION`.
+Эти данные позволяют сравнивать конфигурации не только по общему времени выполнения, но и по причинам задержек.
 
----
-
-# Изменённые top-level модули
-
-Для подключения новых блоков изменены:
-
-- `scr1_top_axi.sv`;
-- `scr1_top_ahb.sv`.
-
-Внешние instruction/data memory requests теперь могут проходить через L1 cache перед передачей в AHB/AXI memory interface.
-
-TCM и memory-mapped timer остаются отдельными блоками существующей архитектуры SCR1.
-
----
-
-# Добавленные RTL-файлы
+## Основные RTL-файлы
 
 | Файл | Назначение |
-|---|---|
-| `icache.sv` | Хранилище DATA/TAG/VALID L1 I-cache |
-| `icache_controller.sv` | FSM и управление L1 I-cache / Victim / refill |
-| `scr1_icache_top.sv` | Интеграция I-cache subsystem |
-| `victim_icache.sv` | Fully-associative Victim Cache |
-| `dcache.sv` | Хранилище DATA/TAG/VALID L1 D-cache |
-| `dcache_controller.sv` | FSM и управление L1 D-cache |
-| `scr1_dcache_top.sv` | Интеграция D-cache subsystem |
+| --- | --- |
+| `scr1/src/top/icache.sv` | DATA/TAG/VALID хранилище L1 I-cache |
+| `scr1/src/top/icache_controller.sv` | FSM I-cache, Victim lookup/swap и refill |
+| `scr1/src/top/victim_icache.sv` | Fully associative Instruction Victim Cache |
+| `scr1/src/top/scr1_icache_top.sv` | Интеграция I-cache и счётчики |
+| `scr1/src/top/dcache.sv` | DATA/TAG/VALID хранилище L1 D-cache |
+| `scr1/src/top/dcache_controller.sv` | FSM load/store, refill и cache update |
+| `scr1/src/top/scr1_write_buffer.sv` | FIFO отложенных write-through store |
+| `scr1/src/top/scr1_dcache_top.sv` | Интеграция D-cache, write buffer и счётчики |
+| `scr1/src/top/scr1_mem_axi.sv` | AXI bridge с потоковой выдачей read beats |
+| `scr1/src/top/scr1_top_axi.sv` | Интеграция кэшей и двух AXI master paths |
+| `scr1/src/top/scr1_top_ahb.sv` | AHB-интеграция без burst refill |
+| `nexys_cache_victim.tcl` | Создание Vivado-проекта для Nexys A7-100T |
 
----
+## Параметры для экспериментов
 
-# Текущая конфигурация
+Основные параметры находятся в top-level модулях:
 
-|     Блок       |  Размер   | Cache line    | Организация       |
-|     ----       |   ---     |     ---       |     ---           |
-| L1 I-cache     | 2 KiB     |     8 B       | Direct-mapped     |
-| Victim I-cache | 4 entries |     8 B       | Fully associative |
-| L1 D-cache     | 2 KiB     |     8 B       | Direct-mapped     |
+| Параметр | Значение по умолчанию | Назначение |
+| --- | ---: | --- |
+| `SCR1_ICACHE_LINE_BYTES` | 8 | Размер строки I-cache |
+| `SCR1_DCACHE_LINE_BYTES` | 8 | Размер строки D-cache |
+| `SCR1_ICACHE_AXI_BURST_ENABLE` | 1 | Burst refill I-cache |
+| `SCR1_DCACHE_AXI_BURST_ENABLE` | 1 | Burst refill D-cache |
+| `SCR1_AXI_MAX_READ_BURST_BEATS` | 8 | Максимальное число beat в read burst |
+| `SCR1_DCACHE_NO_WRITE_ALLOCATE` | 1 | Не выделять строку при store miss |
+| `SCR1_DCACHE_WRITE_BUFFER_DEPTH` | 4 | Глубина write buffer |
 
-# Сравнение SCR1 без кэша и SCR1 c текущей модификацией.
-<img width="1192" height="605" alt="Сравнение результатов" src="https://github.com/user-attachments/assets/72063a4a-7029-41f2-86c8-cc7110a9a692" />
+Последний параметр сейчас задан как `localparam` в AXI/AHB top-level, остальные доступны через параметры модулей.
 
-Ускорение - метрика, означающая во сколько раз SCR1 с текущей модификацией показывает себя быстрее на тесте относительно SCR1 без улучшения.
+## Сборка проекта для Nexys A7-100T
+
+### Требования
+
+- AMD/Xilinx Vivado с поддержкой Artix-7;
+- board files для `digilentinc.com:nexys-a7-100t:part0:1.3`;
+- установленная поддержка MIG 7 Series;
+- Git.
+
+### Создание проекта
+
+```bash
+git clone --branch scr1-cache-improve --recurse-submodules \
+  https://github.com/diofiveal/RISC_opravdan.git
+cd RISC_opravdan
+vivado -mode batch -source nexys_cache_victim.tcl
+```
+
+Скрипт создаёт проект `nexys_a7_100t_scr1_cache_fixed` для `xc7a100tcsg324-1`, добавляет RTL, Block Design, DDR2 MIG, ограничения и стандартные synthesis/implementation runs. После выполнения скрипта проект можно открыть в Vivado и запустить synthesis, implementation и generation of bitstream.
+
+Для другого имени проекта:
+
+```bash
+vivado -mode batch -source nexys_cache_victim.tcl \
+  -tclargs --project_name my_scr1_cache_project
+```
+
+## Результаты
+
+Текущая версия подтверждает работоспособность выбранной архитектуры подсистемы памяти на уровне RTL и FPGA-проекта:
+
+- I-cache и D-cache интегрированы в штатные memory paths SCR1;
+- Victim Cache обрабатывает конфликтные промахи с возвратом строки в L1;
+- refill строки объединён в одну AXI read burst-транзакцию;
+- write buffer позволяет завершать cacheable store до получения внешнего write response;
+- добавлены счётчики для раздельной оценки кэшей, burst и write buffer;
+- Vivado Tcl-воспроизведение проекта настроено под Nexys A7-100T и DDR2.
+
+Ниже приведено имеющееся сравнение исходного SCR1 и версии с улучшенной подсистемой памяти. Были проведены 2 основных теста dhrystone и coremark
+Под ускорением для теста dhrystone понимается отношение метрик dhrystone per sec (количество циклов dhrystone в секунду)
+Под ускорением для теста coremark понимается отношение метрик Iterations/sec (количество итераций теста coremark в секунду)
+<img width="1092" height="572" alt="image" src="https://github.com/user-attachments/assets/19d24e44-12b9-4e43-b9e0-4c9829c43b09" />
+
+
+
+## Направления дальнейшей работы
+
+- отдельные self-checking testbench для AXI burst и write buffer;
+- проверка RAW-зависимостей и возможный store-to-load forwarding;
+- write combining для соседних store;
+- несколько outstanding cache misses или refill-запросов;
+- подбор размера cache line и глубины write buffer;
+- сравнение write-allocate и no-write-allocate на реальных нагрузках;
+- измерение производительности, ресурсов FPGA и энергопотребления;
+- перенос улучшенной подсистемы на AMD Versal VD100.
+
+## Происхождение проекта
+
+Проект основан на открытом процессорном ядре [Syntacore SCR1](https://github.com/syntacore/scr1). Исходная лицензия SCR1 находится в [`scr1/LICENSE`](scr1/LICENSE).
+
